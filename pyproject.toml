@@ -1,0 +1,27 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cdwagent"
+version = "0.2.0"
+description = "MCP server for a de-identified Epic Caboodle Clinical Data Warehouse (SQL Server, read-only). BioRouter extension, sibling of UCSFOMOPAgent."
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Gianmarco Bellucci"},
+    {name = "Wanjun Gu"},
+]
+keywords = [
+    "mcp", "biorouter", "clinical", "ehr", "sql-server", "healthcare",
+    "clinical-informatics", "epic", "caboodle", "cdw"
+]
+dependencies = [
+    "fastmcp>=2.11.2",
+    "pydantic>=2.11.7",
+    "pymssql>=2.3.7",
+    "openpyxl>=3.1.0",
+]
+requires-python = ">=3.11"
+
+scripts.cdwagent = "cdwagent.cli:main"
