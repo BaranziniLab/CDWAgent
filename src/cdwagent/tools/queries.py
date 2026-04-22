@@ -85,13 +85,21 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         - PatientDim: PatientKey, PatientDurableKey, Sex, BirthDate, DeathDate, FirstRace, Ethnicity,
           PreferredLanguage, MaritalStatus, SmokingStatus, IsCurrent, Status, StartDate
         - EncounterFact: Type (NOT EncounterType), DepartmentName, DepartmentSpecialty, DateKey, PatientClass, VisitType
-        - LabComponentResultFact: use Value (string) for results, NOT NumericValue (de-identified).
-          No TextValue/ReferenceLow/ReferenceHigh columns. Use ReferenceValues, Flag, Abnormal.
+        - DiagnosisEventFact: StartDateKey, EndDateKey, DiagnosisKey, PatientDurableKey
+          (NO DateKey column — use StartDateKey for event date)
+        - MedicationOrderFact: OrderedDateKey, StartDateKey, EndDateKey, MedicationKey, PatientDurableKey
+          (NO DateKey column — use StartDateKey/EndDateKey for treatment span)
+        - LabComponentResultFact: ResultDateKey, LabComponentKey, PatientDurableKey,
+          Value (string; use instead of NumericValue which is de-identified),
+          ReferenceValues, Flag, Abnormal. No TextValue/ReferenceLow/ReferenceHigh columns.
+          (NO DateKey column — use ResultDateKey)
         - LabComponentDim: LOINC column is LoincCode (not Loinc)
+        - note_metadata / note_text: deid_note_key (join column), PatientDurableKey,
+          enc_dept_specialty (department filter), deid_service_date, note_type
         - Columns ending in *KeyValue (e.g., DateKeyValue) do NOT exist. Use *Key (integer YYYYMMDD).
         - PatientDim is SCD Type 2: use IsCurrent=1 or ORDER BY StartDate DESC for current data.
 
-        PATIENT IDENTIFIERS:
+        >>> PATIENT IDENTIFIERS (CRITICAL) <<<
         - PatientKey is an SCD Type 2 SURROGATE key — it changes when demographics update.
           Fact tables stamp the PatientKey active at event time, so old keys become IsCurrent=0.
         - PatientDurableKey is the STABLE patient identifier across all table versions.
@@ -99,10 +107,17 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         - For cohort queries: SELECT DISTINCT PatientDurableKey FROM fact_table, then
           join to PatientDim WHERE IsCurrent=1 AND PatientDurableKey IN (...)
 
+        >>> DATE COLUMN PER FACT TABLE (each is different — DO NOT GUESS) <<<
+        - EncounterFact              → DateKey
+        - DiagnosisEventFact         → StartDateKey (and optionally EndDateKey)
+        - MedicationOrderFact        → OrderedDateKey, StartDateKey, EndDateKey
+        - LabComponentResultFact     → ResultDateKey
+        - note_metadata              → deid_service_date (already a DATE, not *Key integer)
+
         DATE HANDLING:
-        - Date columns (*DateKey, *DateKey) are YYYYMMDD integers (e.g., 20240115)
-        - Convert to DATE: CONVERT(DATE, CAST(DateKey AS VARCHAR(8)), 112)
-        - Filter invalid dates: WHERE DateKey > 19000101
+        - *DateKey columns are YYYYMMDD integers (e.g., 20240115)
+        - Convert to DATE: CONVERT(DATE, CAST(StartDateKey AS VARCHAR(8)), 112)
+        - Filter invalid dates: WHERE StartDateKey > 19000101
         - Treatment duration: use StartDateKey/EndDateKey span (not just OrderedDateKey)
 
         PERFORMANCE TIPS:
