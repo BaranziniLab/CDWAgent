@@ -160,11 +160,11 @@ biorouter session --with-extension "CLINICAL_RECORDS_SERVER=... CLINICAL_RECORDS
 
 ## Schema Reference
 
-Schema discovery tools (`get_database_overview`, `describe_table`, `search_schema`) read from a pre-parsed JSON at [`data/schema_reference.json`](data/schema_reference.json) — **no database connection is required** for schema exploration. The JSON contains only structural metadata: table names, column names, data types, and descriptions. No patient data, no institutional identifiers.
+Schema discovery tools (`get_database_overview`, `describe_table`, `search_schema`) read from a pre-parsed JSON at [`src/cdwagent/data/schema_reference.json`](src/cdwagent/data/schema_reference.json) (bundled inside the Python package so `uvx` installs work out of the box) — **no database connection is required** for schema exploration. The JSON contains only structural metadata: table names, column names, data types, and descriptions. No patient data, no institutional identifiers.
 
 **The source Epic Caboodle data dictionary (`.xlsx`) is intentionally NOT bundled with this repository.** It is a local governance artifact of each institution. The committed JSON is a derived representation — everything CDWAgent needs at runtime — but the original xlsx stays under institutional control.
 
-If you need to regenerate `data/schema_reference.json` from an updated dictionary, obtain the xlsx through your institution's CDW governance channel and run:
+If you need to regenerate `src/cdwagent/data/schema_reference.json` from an updated dictionary, obtain the xlsx through your institution's CDW governance channel and run:
 
 ```bash
 uv run python scripts/parse_data_dictionary.py /path/to/deid_uf_data_dictionary.xlsx

@@ -78,7 +78,7 @@ def parse_data_dictionary(xlsx_path: str, output_path: str):
 if __name__ == "__main__":
     project_root = Path(__file__).parent.parent
     default_xlsx = project_root / "deid_uf_data_dictionary.xlsx"
-    default_output = project_root / "data" / "schema_reference.json"
+    default_output = project_root / "src" / "cdwagent" / "data" / "schema_reference.json"
 
     xlsx = Path(sys.argv[1]) if len(sys.argv) > 1 else default_xlsx
     output = Path(sys.argv[2]) if len(sys.argv) > 2 else default_output
@@ -88,7 +88,8 @@ if __name__ == "__main__":
             f"Data dictionary xlsx not found at: {xlsx}\n"
             "\n"
             "The data dictionary is NOT bundled with this repository.\n"
-            "To regenerate data/schema_reference.json, obtain the Epic Caboodle\n"
+            "To regenerate src/cdwagent/data/schema_reference.json, obtain the\n"
+            "Epic Caboodle\n"
             "data dictionary xlsx through your institution's CDW governance\n"
             "channel and pass its path:\n"
             "\n"

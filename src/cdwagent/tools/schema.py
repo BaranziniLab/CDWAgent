@@ -12,7 +12,7 @@ from mcp.types import ToolAnnotations
 
 logger = logging.getLogger("CDWAgent")
 
-_SCHEMA_REF_PATH = Path(__file__).parent.parent.parent.parent / "data" / "schema_reference.json"
+_SCHEMA_REF_PATH = Path(__file__).parent.parent / "data" / "schema_reference.json"
 _schema_ref: Optional[dict] = None
 
 

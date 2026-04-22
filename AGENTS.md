@@ -73,7 +73,7 @@ src/cdwagent/
 
 ### Schema Reference
 
-The data dictionary (139 tables, ~5000 columns) is parsed into `data/schema_reference.json` by `scripts/parse_data_dictionary.py`. Schema tools read from this JSON at runtime — no DB connection needed for schema discovery.
+The data dictionary (139 tables, ~5000 columns) is parsed into `src/cdwagent/data/schema_reference.json` by `scripts/parse_data_dictionary.py`. The JSON lives **inside the Python package** so it ships with the wheel and is found at runtime under any install layout (editable, pip, uvx). Schema tools read from it without needing a DB connection.
 
 **The source xlsx is NOT bundled in this repository** (local-governance artifact). The parsed JSON is committed, so the runtime has everything it needs. If you need to regenerate the JSON from an updated dictionary, obtain the xlsx through your institution's CDW governance channel and run:
 
