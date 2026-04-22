@@ -54,10 +54,29 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         )
     )
     def query(
-        sql_query: str = Field(..., description="Read-only SQL SELECT query"),
+        sql_query: str = Field(
+            ...,
+            description=(
+                "Read-only SQL SELECT query. "
+                "CRITICAL: every table MUST be schema-qualified with 'deid_uf.' "
+                "(e.g. 'deid_uf.PatientDim', 'deid_uf.EncounterFact'). "
+                "Unqualified tables resolve to the 'deid' schema which lacks key columns "
+                "like PatientDurableKey and will fail with 'Invalid column name' errors."
+            ),
+        ),
         row_limit: int = Field(DEFAULT_ROW_LIMIT, description="Maximum rows to return (default 1000)")
     ) -> ToolResult:
         """Execute a READ-ONLY SQL query on the Clinical Data Warehouse.
+
+        >>> SCHEMA RULE (READ FIRST) <<<
+        Every table MUST be prefixed with the 'deid_uf' schema, e.g. 'deid_uf.PatientDim',
+        'deid_uf.EncounterFact', 'deid_uf.note_metadata'. Without the prefix, SQL Server
+        resolves to the 'deid' schema which does NOT have PatientDurableKey and most extended
+        columns — you will get 'Invalid column name' errors.
+
+        Example correct: SELECT COUNT(DISTINCT PatientDurableKey) FROM deid_uf.PatientDim
+        Example WRONG:   SELECT COUNT(DISTINCT PatientDurableKey) FROM PatientDim
+
         Only SELECT, WITH, and DECLARE statements are allowed. SQL comments (--) are supported.
         Results are returned as CSV. Use get_database_overview and describe_table first
         to understand the schema before writing queries.
@@ -71,7 +90,6 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         - LabComponentDim: LOINC column is LoincCode (not Loinc)
         - Columns ending in *KeyValue (e.g., DateKeyValue) do NOT exist. Use *Key (integer YYYYMMDD).
         - PatientDim is SCD Type 2: use IsCurrent=1 or ORDER BY StartDate DESC for current data.
-        - All tables must be schema-qualified (e.g., deid_uf.PatientDim)
 
         PATIENT IDENTIFIERS:
         - PatientKey is an SCD Type 2 SURROGATE key — it changes when demographics update.

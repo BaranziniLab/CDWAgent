@@ -31,10 +31,23 @@ def register_export_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: 
         )
     )
     def export_query_to_csv(
-        sql_query: str = Field(..., description="Read-only SQL SELECT query to export"),
+        sql_query: str = Field(
+            ...,
+            description=(
+                "Read-only SQL SELECT query to export. "
+                "CRITICAL: every table MUST be schema-qualified with 'deid_uf.' "
+                "(e.g. 'deid_uf.PatientDim'). Unqualified tables resolve to the 'deid' schema "
+                "which lacks key columns like PatientDurableKey."
+            ),
+        ),
         filepath: str = Field(..., description="Full file path where the CSV should be saved (e.g., /Users/me/exports/results.csv)")
     ) -> ToolResult:
         """Execute a read-only SQL query and save results to a CSV file at the specified path.
+
+        SCHEMA RULE: prefix every table with 'deid_uf.' — e.g. 'deid_uf.PatientDim'.
+        Without the prefix, SQL Server resolves to the 'deid' schema and columns like
+        PatientDurableKey will not be found.
+
         The directory must already exist. Returns the number of rows exported and the file path."""
         if not ClinicalQueryValidator.is_read_only_clinical_query(sql_query):
             raise ToolError("Only SELECT queries are allowed for export.")
