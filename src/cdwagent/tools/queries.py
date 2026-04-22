@@ -68,67 +68,17 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
     ) -> ToolResult:
         """Execute a READ-ONLY SQL query on the Clinical Data Warehouse.
 
-        >>> SCHEMA RULE (READ FIRST) <<<
-        Every table MUST be prefixed with the 'deid_uf' schema, e.g. 'deid_uf.PatientDim',
-        'deid_uf.EncounterFact', 'deid_uf.note_metadata'. Without the prefix, SQL Server
-        resolves to the 'deid' schema which does NOT have PatientDurableKey and most extended
-        columns — you will get 'Invalid column name' errors.
+        >>> SCHEMA RULE (most common error source) <<<
+        Every table MUST be prefixed with 'deid_uf.' — e.g. 'deid_uf.PatientDim'.
+        Unqualified tables resolve to the 'deid' schema which lacks PatientDurableKey.
+        Correct: SELECT COUNT(DISTINCT PatientDurableKey) FROM deid_uf.PatientDim
+        Wrong:   SELECT COUNT(DISTINCT PatientDurableKey) FROM PatientDim
 
-        Example correct: SELECT COUNT(DISTINCT PatientDurableKey) FROM deid_uf.PatientDim
-        Example WRONG:   SELECT COUNT(DISTINCT PatientDurableKey) FROM PatientDim
+        Only SELECT, WITH, DECLARE statements are allowed. Results as CSV.
 
-        Only SELECT, WITH, and DECLARE statements are allowed. SQL comments (--) are supported.
-        Results are returned as CSV. Use get_database_overview and describe_table first
-        to understand the schema before writing queries.
-
-        IMPORTANT — COLUMN NAMES:
-        - PatientDim: PatientKey, PatientDurableKey, Sex, BirthDate, DeathDate, FirstRace, Ethnicity,
-          PreferredLanguage, MaritalStatus, SmokingStatus, IsCurrent, Status, StartDate
-        - EncounterFact: Type (NOT EncounterType), DepartmentName, DepartmentSpecialty, DateKey, PatientClass, VisitType
-        - DiagnosisEventFact: StartDateKey, EndDateKey, DiagnosisKey, PatientDurableKey
-          (NO DateKey column — use StartDateKey for event date)
-        - MedicationOrderFact: OrderedDateKey, StartDateKey, EndDateKey, MedicationKey, PatientDurableKey
-          (NO DateKey column — use StartDateKey/EndDateKey for treatment span)
-        - LabComponentResultFact: ResultDateKey, LabComponentKey, PatientDurableKey,
-          Value (string; use instead of NumericValue which is de-identified),
-          ReferenceValues, Flag, Abnormal. No TextValue/ReferenceLow/ReferenceHigh columns.
-          (NO DateKey column — use ResultDateKey)
-        - LabComponentDim: LOINC column is LoincCode (not Loinc)
-        - note_metadata / note_text: deid_note_key (join column), PatientDurableKey,
-          enc_dept_specialty (department filter), deid_service_date, note_type
-        - Columns ending in *KeyValue (e.g., DateKeyValue) do NOT exist. Use *Key (integer YYYYMMDD).
-        - PatientDim is SCD Type 2: use IsCurrent=1 or ORDER BY StartDate DESC for current data.
-
-        >>> PATIENT IDENTIFIERS (CRITICAL) <<<
-        - PatientKey is an SCD Type 2 SURROGATE key — it changes when demographics update.
-          Fact tables stamp the PatientKey active at event time, so old keys become IsCurrent=0.
-        - PatientDurableKey is the STABLE patient identifier across all table versions.
-        - ALWAYS use PatientDurableKey (not PatientKey) to join fact tables to PatientDim.
-        - For cohort queries: SELECT DISTINCT PatientDurableKey FROM fact_table, then
-          join to PatientDim WHERE IsCurrent=1 AND PatientDurableKey IN (...)
-
-        >>> DATE COLUMN PER FACT TABLE (each is different — DO NOT GUESS) <<<
-        - EncounterFact              → DateKey
-        - DiagnosisEventFact         → StartDateKey (and optionally EndDateKey)
-        - MedicationOrderFact        → OrderedDateKey, StartDateKey, EndDateKey
-        - LabComponentResultFact     → ResultDateKey
-        - note_metadata              → deid_service_date (already a DATE, not *Key integer)
-
-        DATE HANDLING:
-        - *DateKey columns are YYYYMMDD integers (e.g., 20240115)
-        - Convert to DATE: CONVERT(DATE, CAST(StartDateKey AS VARCHAR(8)), 112)
-        - Filter invalid dates: WHERE StartDateKey > 19000101
-        - Treatment duration: use StartDateKey/EndDateKey span (not just OrderedDateKey)
-
-        PERFORMANCE TIPS:
-        - NEVER JOIN PatientDim directly to fact tables — causes timeouts on this CDW
-        - Use WHERE PatientDurableKey IN (subquery) pattern instead
-        - Use SELECT DISTINCT TOP N (not SELECT TOP N DISTINCT)
-        - CTE + JOIN patterns also timeout — use subqueries instead
-        - Multi-fact queries (e.g., diagnosis + medication): use a 2-step approach.
-          First query concept tools to get key values, then use hardcoded IN (...) lists
-          instead of nested subqueries across multiple fact tables.
-        - note_metadata/note_text use PatientDurableKey (not PatientKey)"""
+        For table lists, column names, date-column mapping per fact table, and performance
+        patterns, see the server instructions (loaded at session start). For specific table
+        details call describe_table(table_name)."""
         result = _execute_readonly_query(clinical_config, sql_query, row_limit)
         return ToolResult(content=[TextContent(type="text", text=result)])
 

@@ -156,3 +156,16 @@ BioRouter does NOT use a classifier to pick agents; it flattens all enabled exte
 - Tool names and descriptions ARE the routing signal — keep the `CDW-` prefix to disambiguate from OMOPAgent's `query_ucsf_omop` etc.
 - `timeout: 600` is recommended in the BioRouter config entry — some cohort queries approach the default 300s.
 - Publish tagged releases so BioRouter's `extension_malware_check` pins a stable git ref.
+
+### Context strategy (LLM dispatch optimization)
+
+Because CDW Epic Caboodle is a proprietary schema, the LLM needs explicit context to pick tools correctly. CDWAgent splits this across two MCP channels:
+
+1. **Server instructions** (`CDW_SERVER_INSTRUCTIONS` in `server.py`, passed to `FastMCP(..., instructions=...)`). Loaded once per session via `InitializeResult.instructions`. Contains: the 14 most-used tables, the schema-qualification rule, PatientDurableKey pattern, per-fact-table date column mapping, performance patterns. ~800 tokens.
+2. **Tool descriptions**. Kept short. Only the `query` and `export_query_to_csv` tools repeat the schema-qualification rule as a banner (top error source). Everything else defers to server instructions. ~150 words per tool.
+
+Net effect per 10-turn conversation: CDWAgent context footprint ~2500 tokens (instructions loaded once + short descriptions × N turns) vs ~9500 tokens if everything lived in tool descriptions. ~4x reduction.
+
+For tables beyond the 14 core ones (139 total), the LLM calls `get_database_overview` / `describe_table` on demand — pulled into the turn context only when needed.
+
+**When adding a new tool**, follow this pattern: keep the docstring focused on what the tool does and tool-specific rules. Leave schema/patient-identifier/date-mapping info to server instructions unless the new tool introduces a new error surface.

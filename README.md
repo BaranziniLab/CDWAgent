@@ -158,6 +158,18 @@ biorouter session --with-extension "CLINICAL_RECORDS_SERVER=... CLINICAL_RECORDS
 
 **Tip — pairing with OMOPAgent:** enable both extensions to translate between the two clinical data representations. Ask BioRouter *"for OMOP person_id 12345, pull lab trends from the CDW side"* and it will call `CDW-crossmap_patient` then `CDW-get_labs`. See [`docs/BIOROUTER.md`](docs/BIOROUTER.md) for operational details (timeouts, malware check, tool-name disambiguation).
 
+## Context Strategy (LLM dispatch optimization)
+
+CDW Epic Caboodle uses a proprietary schema the LLM does not know from its training data (unlike OMOP CDM, where OHDSI terms are well-known). To minimize roundtrips and context usage, CDWAgent ships schema context at **two layers**:
+
+1. **MCP `server instructions`** — a concise overview of the 14 most-used tables, patient identifier rules, date-column mapping per fact table, and the cohort subquery pattern. Sent once at session init via `InitializeResult.instructions` (FastMCP feature). BioRouter and other MCP clients fold this into the LLM's system prompt. Net effect: the LLM knows the schema the moment it picks any CDW tool, without a `get_database_overview` roundtrip.
+
+2. **Tool descriptions** — kept short (~150 words each). Only the single most common failure mode (schema-qualification with `deid_uf.`) is repeated in the `query` tool description as a banner, since it is the top error source. Everything else lives in the server instructions.
+
+Long tail: 139 total tables, ~5000 columns. Full listing is available on-demand via `get_database_overview` and `describe_table` — not pushed into the system prompt.
+
+This is the generic pattern for MCPs targeting non-standard schemas. Thin tool descriptions + rich server instructions keeps turn-by-turn context small (tool descriptions are sent on every LLM turn; instructions are sent once) while still providing the context the LLM needs up front.
+
 ## Schema Reference
 
 Schema discovery tools (`get_database_overview`, `describe_table`, `search_schema`) read from a pre-parsed JSON at [`src/cdwagent/data/schema_reference.json`](src/cdwagent/data/schema_reference.json) (bundled inside the Python package so `uvx` installs work out of the box) — **no database connection is required** for schema exploration. The JSON contains only structural metadata: table names, column names, data types, and descriptions. No patient data, no institutional identifiers.

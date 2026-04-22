@@ -16,6 +16,74 @@ from cdwagent.tools.stats import register_stats_tools
 logger = logging.getLogger("CDWAgent")
 
 
+# Loaded once at session init by the MCP client (BioRouter / Claude Desktop / etc.)
+# via InitializeResult.instructions. Most of the schema-specific context lives here
+# so individual tool descriptions can stay concise.
+CDW_SERVER_INSTRUCTIONS = """\
+This server exposes the UF Epic Caboodle Clinical Data Warehouse (SQL Server, read-only,
+de-identified). Patient data is pseudonymized. Default schema: deid_uf.
+
+>>> SCHEMA-QUALIFY EVERY TABLE <<<
+Prefix ALL tables with 'deid_uf.' (e.g. 'deid_uf.PatientDim'). Unqualified tables resolve
+to the 'deid' schema which lacks PatientDurableKey and most extended columns.
+
+>>> PATIENT IDENTIFIERS <<<
+- PatientDurableKey = STABLE patient ID. Use this for ALL cohort/join logic.
+- PatientKey = SCD Type 2 SURROGATE, changes when demographics update. AVOID for joins.
+- Cohort pattern: WHERE PatientDurableKey IN (SELECT DISTINCT PatientDurableKey FROM fact ...)
+- NEVER join PatientDim ↔ fact tables directly — causes timeouts (>120s).
+
+>>> DATE COLUMNS (vary per fact table — DO NOT GUESS) <<<
+- EncounterFact              → DateKey
+- DiagnosisEventFact         → StartDateKey (and EndDateKey)
+- MedicationOrderFact        → OrderedDateKey, StartDateKey, EndDateKey
+- LabComponentResultFact     → ResultDateKey
+- ProcedureEventFact         → ProcedureDateKey
+- note_metadata              → deid_service_date (a DATE, not *Key integer)
+All *DateKey columns are YYYYMMDD integers:
+  CONVERT(DATE, CAST(StartDateKey AS VARCHAR(8)), 112)
+Filter invalid: WHERE StartDateKey > 19000101.
+
+>>> KEY TABLES (14 of 139 — call get_database_overview for the long tail) <<<
+Dimensions (SCD2, filter IsCurrent=1):
+  deid_uf.PatientDim             — demographics (PatientKey, PatientDurableKey, Sex,
+                                    BirthDate, DeathDate, FirstRace, Ethnicity, Status)
+  deid_uf.LabComponentDim        — lab dictionary (LOINC: LoincCode, not Loinc)
+  deid_uf.DiagnosisDim           — diagnosis names
+  deid_uf.MedicationDim          — medication names
+  deid_uf.ProcedureDim           — procedure names
+  deid_uf.DepartmentDim          — departments
+  deid_uf.ProviderDim            — clinicians
+
+Facts (events):
+  deid_uf.EncounterFact          — encounters (Type NOT EncounterType, DepartmentSpecialty)
+  deid_uf.DiagnosisEventFact     — diagnoses
+  deid_uf.MedicationOrderFact    — medication orders
+  deid_uf.LabComponentResultFact — labs (use Value string, NOT NumericValue which is DEID'd)
+  deid_uf.ProcedureEventFact     — procedures
+
+Terminology lookups:
+  deid_uf.DiagnosisTerminologyDim — ICD/SNOMED codes
+  deid_uf.MedicationCodeDim       — NDC/RxNorm codes
+
+Clinical notes:
+  deid_uf.note_metadata — metadata. Join: deid_note_key. Filter: enc_dept_specialty.
+  deid_uf.note_text     — full text. Join on deid_note_key.
+
+>>> PERFORMANCE <<<
+- Use subquery pattern for cohort joins (above). CTE+JOIN also timeout.
+- SQL Server syntax: SELECT DISTINCT TOP N (not SELECT TOP N DISTINCT).
+- Multi-fact queries: resolve concept keys first via search_*_by_code tools, then use
+  hardcoded IN (...) lists rather than nesting subqueries across fact tables.
+- Stay in one schema (deid_uf) — cross-schema joins timeout.
+
+>>> TOOL HINT <<<
+- For table metadata beyond this list: call describe_table(table_name) or get_database_overview().
+- For code/concept lookup (ICD, NDC, CPT): call search_diagnoses_by_code / search_medications_by_code / search_procedures_by_code.
+- For OMOP→CDW patient resolution: crossmap_patient(person_id).
+"""
+
+
 def _format_namespace(namespace: str) -> str:
     """Format namespace with trailing dash if needed"""
     if namespace:
@@ -27,7 +95,7 @@ def create_cdw_server(config: CDWConfig) -> FastMCP:
     """Create CDWAgent server with all tool modules registered"""
     logging.basicConfig(level=getattr(logging, config.log_level.upper()))
 
-    mcp = FastMCP("CDWAgent")
+    mcp = FastMCP("CDWAgent", instructions=CDW_SERVER_INSTRUCTIONS)
     ns = _format_namespace(config.namespace)
 
     # Schema tools (bundled reference, no DB connection needed)
