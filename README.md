@@ -94,6 +94,15 @@ The server includes three MCP prompts that guide the LLM through common workflow
 - **cohort_building** — Cohort identification workflow with correct patient identifier patterns and query optimization tips
 - **notes_analysis** — Clinical notes investigation from patient identification through note retrieval and summarization
 
+## Validation
+
+CDWAgent has been end-to-end validated against the two BAA-covered LLM providers supported at UCSF:
+
+- **Azure OpenAI GPT-5.2** via the UCSF unified-api endpoint
+- **AWS Bedrock — Sonnet 4.6**
+
+The eval suite covers cohort identification by structured codes, multi-criteria intersection, longitudinal lab and medication trajectories, NLP-based phenotype extraction over the cTAKES `note_concepts` and `note_concepts_sdoh` layers, OMOP↔CDW patient crossmapping, ambiguity disambiguation, and read-only enforcement. All cases pass against both providers under the v0.4.3 release. The eval harness lives in [`neuroGB/CDWAgent_testing`](https://github.com/neuroGB/CDWAgent_testing) (private).
+
 ## Installation
 
 ### Requirements

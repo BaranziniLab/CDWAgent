@@ -16,8 +16,8 @@ from cdwagent.tools.stats import register_stats_tools
 logger = logging.getLogger("CDWAgent")
 
 
-# Loaded once at session init by the MCP client (BioRouter / Claude Desktop / etc.)
-# via InitializeResult.instructions. Most of the schema-specific context lives here
+# Loaded once at session init by the host MCP client via
+# InitializeResult.instructions. Most of the schema-specific context lives here
 # so individual tool descriptions can stay concise.
 CDW_SERVER_INSTRUCTIONS = """\
 This server exposes the UF Epic Caboodle Clinical Data Warehouse (SQL Server, read-only,

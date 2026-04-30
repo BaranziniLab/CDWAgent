@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Smoke tests (no DB, no LLM)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync
+
+      - name: Verify package builds
+        run: uv build --wheel
+
+      - name: Verify CLI entry point
+        run: |
+          uv run python -c "from cdwagent.server import create_cdw_server, CDW_SERVER_INSTRUCTIONS; assert 'PatientDurableKey' in CDW_SERVER_INSTRUCTIONS; print('server instructions loaded ok')"
+
+      - name: Verify all tools register with namespace
+        run: |
+          uv run python <<'PY'
+          import asyncio
+          from fastmcp import Client
+          from cdwagent.config import CDWConfig, ClinicalDBConfig
+          from cdwagent.server import create_cdw_server
+
+          EXPECTED = {
+              "CDW-get_database_overview", "CDW-describe_table", "CDW-search_schema",
+              "CDW-query", "CDW-get_patient_demographics", "CDW-crossmap_patient",
+              "CDW-get_encounters", "CDW-get_medications", "CDW-get_diagnoses", "CDW-get_labs",
+              "CDW-search_note_concepts", "CDW-search_note_sdoh", "CDW-search_notes", "CDW-get_note",
+              "CDW-export_query_to_csv",
+              "CDW-search_diagnoses_by_code", "CDW-search_medications_by_code",
+              "CDW-search_labs_by_code", "CDW-search_procedures_by_code",
+              "CDW-summarize_table", "CDW-cohort_summary",
+          }
+
+          async def main():
+              cfg = CDWConfig(clinical_db=ClinicalDBConfig(username="x", password="x"))
+              mcp = create_cdw_server(cfg)
+              async with Client(mcp) as c:
+                  tools = await c.list_tools()
+              names = {t.name for t in tools}
+              diff = names ^ EXPECTED
+              assert not diff, f"tool diff: {diff}"
+              print(f"OK — {len(names)} tools registered")
+
+          asyncio.run(main())
+          PY
+
+      - name: Verify read-only validator blocks writes
+        run: |
+          uv run python <<'PY'
+          from cdwagent.validation import ClinicalQueryValidator
+          v = ClinicalQueryValidator()
+          for sql in [
+              "INSERT INTO PatientDim VALUES (1)",
+              "DELETE FROM deid_uf.PatientDim",
+              "UPDATE PatientDim SET Sex='X'",
+              "DROP TABLE deid_uf.PatientDim",
+              "TRUNCATE TABLE deid_uf.PatientDim",
+              "ALTER TABLE deid_uf.PatientDim ADD col INT",
+              "EXEC sp_help",
+              "SELECT 1; DROP TABLE PatientDim",
+              "MERGE INTO PatientDim USING ...",
+              "CREATE TABLE foo (id INT)",
+          ]:
+              assert not v.is_read_only_clinical_query(sql), f"validator failed to block: {sql!r}"
+          for sql in [
+              "SELECT * FROM deid_uf.PatientDim WHERE IsCurrent=1",
+              "WITH cte AS (SELECT 1 AS x) SELECT * FROM cte",
+              "SELECT TOP 10 * FROM deid_uf.EncounterFact",
+              "SELECT DISTINCT TOP 5 PatientDurableKey FROM deid_uf.PatientDim",
+          ]:
+              assert v.is_read_only_clinical_query(sql), f"validator wrongly rejected: {sql!r}"
+          print("OK — read-only validator boundaries verified")
+          PY
+
+      - name: Verify schema reference is bundled and readable
+        run: |
+          uv run python <<'PY'
+          import json
+          from importlib.resources import files
+          data = files("cdwagent.data").joinpath("schema_reference.json").read_text()
+          schema = json.loads(data)
+          assert "PatientDim" in schema, "PatientDim missing from schema reference"
+          assert "note_concepts" in schema, "note_concepts missing from schema reference"
+          assert "note_concepts_sdoh" in schema, "note_concepts_sdoh missing from schema reference"
+          print(f"OK — schema reference loaded: {len(schema)} tables")
+          PY
