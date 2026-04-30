@@ -114,13 +114,13 @@ The eval suite covers cohort identification by structured codes, multi-criteria 
 ### Quick install (uvx)
 
 ```bash
-uvx --from git+https://github.com/neuroGB/CDWAgent cdwagent
+uvx --from git+https://github.com/BaranziniLab/CDWAgent cdwagent
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/neuroGB/CDWAgent.git
+git clone https://github.com/BaranziniLab/CDWAgent.git
 cd CDWAgent
 uv sync
 cp .env.example .env
@@ -164,7 +164,7 @@ extensions:
     description: UF Epic Caboodle de-identified Clinical Data Warehouse (SQL Server, read-only)
     enabled: true
     cmd: uvx
-    args: ["--from", "git+https://github.com/neuroGB/CDWAgent", "cdwagent"]
+    args: ["--from", "git+https://github.com/BaranziniLab/CDWAgent", "cdwagent"]
     timeout: 600
     envs:
       CLINICAL_RECORDS_USERNAME: "your-username"
@@ -177,7 +177,7 @@ Server and database are hard-coded to the UCSF CDW deployment; override with `CL
 Or via CLI:
 
 ```bash
-biorouter session --with-extension "CLINICAL_RECORDS_USERNAME=... CLINICAL_RECORDS_PASSWORD=... uvx --from git+https://github.com/neuroGB/CDWAgent cdwagent"
+biorouter session --with-extension "CLINICAL_RECORDS_USERNAME=... CLINICAL_RECORDS_PASSWORD=... uvx --from git+https://github.com/BaranziniLab/CDWAgent cdwagent"
 ```
 
 **Tip — pairing with OMOPAgent:** enable both extensions to translate between the two clinical data representations. Ask BioRouter *"for OMOP person_id 12345, pull lab trends from the CDW side"* and it will call `CDW-crossmap_patient` then `CDW-get_labs`. See [`docs/BIOROUTER.md`](docs/BIOROUTER.md) for operational details (timeouts, malware check, tool-name disambiguation).
