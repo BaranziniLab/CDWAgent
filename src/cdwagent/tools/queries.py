@@ -9,8 +9,7 @@ from fastmcp.tools.tool import ToolResult, TextContent
 from mcp.types import ToolAnnotations
 
 from cdwagent.config import ClinicalDBConfig
-from cdwagent.db import get_connection
-from cdwagent.sql_log import log_sql as _log_sql_to_file
+from cdwagent.db import run_query_csv, run_rows, rows_to_csv, sql_escape_literal
 from cdwagent.validation import ClinicalQueryValidator
 
 logger = logging.getLogger("CDWAgent")
@@ -19,29 +18,14 @@ DEFAULT_ROW_LIMIT = 1000
 
 
 def _execute_readonly_query(config: ClinicalDBConfig, sql: str, row_limit: int = DEFAULT_ROW_LIMIT) -> str:
-    """Execute a validated read-only query and return CSV-formatted results"""
+    """Validate (read-only) then execute USER-SUPPLIED SQL.
+
+    Validation only matters for free-text SQL coming from the user (the `query`
+    tool). Execution, RFC-4180 CSV, timeouts, and schema-drift hints all live in
+    db.run_query_csv now (C2/C4/P1)."""
     if not ClinicalQueryValidator.is_read_only_clinical_query(sql):
         raise ToolError("Only SELECT queries are allowed. Write operations are blocked for security.")
-
-    # Audit log: append SQL to file (independent of stdout/stderr routing).
-    _log_sql_to_file(sql)
-
-    conn = get_connection(config)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        rows = cursor.fetchmany(row_limit)
-        cursor.close()
-    finally:
-        conn.close()
-
-    if not columns:
-        return "Query executed successfully (no results returned)"
-
-    csv_lines = [",".join(columns)]
-    csv_lines.extend([",".join(str(v) if v is not None else "" for v in row) for row in rows])
-    return "\n".join(csv_lines)
+    return run_query_csv(config, sql, row_limit=row_limit)
 
 
 def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: ClinicalDBConfig, schema: str = "deid_uf"):
@@ -109,9 +93,11 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         FirstRace, Ethnicity, PreferredLanguage, MaritalStatus, SmokingStatus, IsCurrent, Status."""
         # Auto-detect: if it looks like a PatientDurableKey (appears in both PatientKey and PatientDurableKey),
         # query by PatientDurableKey for reliable matching
+        pid = sql_escape_literal(patient_id)
+        # PatientDim is a (small) dimension, so accepting either key here is cheap.
         sql = (
             f"SELECT TOP 1 * FROM {schema}.PatientDim "
-            f"WHERE (PatientDurableKey = '{patient_id}' OR PatientKey = '{patient_id}') "
+            f"WHERE (PatientDurableKey = '{pid}' OR PatientKey = '{pid}') "
             f"ORDER BY CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END, StartDate DESC"
         )
         result = _execute_readonly_query(clinical_config, sql)
@@ -147,19 +133,17 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
             f"ON p.person_source_value = pd.PatientEpicId AND pd.IsCurrent = 1 "
             f"WHERE p.person_id = {int(person_id)}"
         )
-        result = _execute_readonly_query(clinical_config, sql, row_limit=1)
+        # C3 fix: read structured rows instead of re-parsing the tool's own CSV
+        # (race / ethnicity / datetime values can contain commas, which broke
+        # the previous split(',') birth-date sanity check).
+        columns, rows = run_rows(clinical_config, sql, row_limit=1)
+        result = rows_to_csv(columns, rows) if columns else "No results found."
 
-        # Add sanity check info
-        lines = result.strip().split("\n")
-        if len(lines) >= 2:
-            headers = lines[0].split(",")
-            values = lines[1].split(",")
-            row = dict(zip(headers, values))
-            omop_date = row.get("omop_birth_date", "").strip()
-            cdw_date = row.get("cdw_birth_date", "").strip()
-            # Compare date portions (OMOP may have datetime, CDW may have date)
-            omop_short = omop_date[:10] if omop_date else ""
-            cdw_short = cdw_date[:10] if cdw_date else ""
+        if rows:
+            row = dict(zip(columns, rows[0]))
+            omop_date = str(row.get("omop_birth_date") or "").strip()
+            cdw_date = str(row.get("cdw_birth_date") or "").strip()
+            omop_short, cdw_short = omop_date[:10], cdw_date[:10]
             match = omop_short == cdw_short if (omop_short and cdw_short) else False
             result += f"\n\nbirth_date_match: {match}"
             if not match:
@@ -185,11 +169,14 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
     ) -> ToolResult:
         """Retrieve encounter history for a patient from EncounterFact.
 
-        IMPORTANT: Use PatientDurableKey (stable) rather than PatientKey (SCD surrogate).
+        IMPORTANT: Pass a PatientDurableKey (stable). PatientKey is an SCD surrogate and is
+        NOT matched here (an OR across both columns defeats the index on this large fact table);
+        resolve a PatientKey to its PatientDurableKey via get_patient_demographics first.
         Key columns: EncounterKey, PatientKey, PatientDurableKey, DateKey, Type (not EncounterType),
         DepartmentName, DepartmentSpecialty, PatientClass, VisitType."""
-        sql = (f"SELECT TOP {row_limit} * FROM {schema}.EncounterFact "
-               f"WHERE PatientDurableKey = '{patient_id}' OR PatientKey = '{patient_id}' "
+        pid = sql_escape_literal(patient_id)
+        sql = (f"SELECT TOP {int(row_limit)} * FROM {schema}.EncounterFact "
+               f"WHERE PatientDurableKey = '{pid}' "
                f"ORDER BY DateKey DESC")
         result = _execute_readonly_query(clinical_config, sql, row_limit)
         return ToolResult(content=[TextContent(type="text", text=result)])
@@ -210,11 +197,13 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
     ) -> ToolResult:
         """Retrieve medication order records for a patient from MedicationOrderFact.
 
-        IMPORTANT: Use PatientDurableKey (stable) rather than PatientKey (SCD surrogate).
+        IMPORTANT: Pass a PatientDurableKey (stable). PatientKey is not matched here (OR across
+        both defeats the index on this large fact table); resolve upstream if you only have one.
         Treatment duration: use StartDateKey/EndDateKey span, not just OrderedDateKey.
         Filter invalid dates: WHERE DateKey > 19000101."""
-        sql = (f"SELECT TOP {row_limit} * FROM {schema}.MedicationOrderFact "
-               f"WHERE PatientDurableKey = '{patient_id}' OR PatientKey = '{patient_id}' "
+        pid = sql_escape_literal(patient_id)
+        sql = (f"SELECT TOP {int(row_limit)} * FROM {schema}.MedicationOrderFact "
+               f"WHERE PatientDurableKey = '{pid}' "
                f"ORDER BY OrderedDateKey DESC")
         result = _execute_readonly_query(clinical_config, sql, row_limit)
         return ToolResult(content=[TextContent(type="text", text=result)])
@@ -235,9 +224,11 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
     ) -> ToolResult:
         """Retrieve diagnosis history for a patient from DiagnosisEventFact.
 
-        IMPORTANT: Use PatientDurableKey (stable) rather than PatientKey (SCD surrogate)."""
-        sql = (f"SELECT TOP {row_limit} * FROM {schema}.DiagnosisEventFact "
-               f"WHERE PatientDurableKey = '{patient_id}' OR PatientKey = '{patient_id}' "
+        IMPORTANT: Pass a PatientDurableKey (stable). PatientKey is not matched here (OR across
+        both defeats the index on this large fact table); resolve upstream if you only have one."""
+        pid = sql_escape_literal(patient_id)
+        sql = (f"SELECT TOP {int(row_limit)} * FROM {schema}.DiagnosisEventFact "
+               f"WHERE PatientDurableKey = '{pid}' "
                f"ORDER BY StartDateKey DESC")
         result = _execute_readonly_query(clinical_config, sql, row_limit)
         return ToolResult(content=[TextContent(type="text", text=result)])
@@ -258,11 +249,13 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
     ) -> ToolResult:
         """Retrieve lab component results for a patient from LabComponentResultFact.
 
-        IMPORTANT: Use PatientDurableKey (stable) rather than PatientKey (SCD surrogate).
+        IMPORTANT: Pass a PatientDurableKey (stable). PatientKey is not matched here (OR across
+        both defeats the index on this large fact table); resolve upstream if you only have one.
         Key columns: Value (string result — use this, not NumericValue which is DEID'd),
         ReferenceValues (combined string), Flag, Abnormal, ResultDateKey (YYYYMMDD int)."""
-        sql = (f"SELECT TOP {row_limit} * FROM {schema}.LabComponentResultFact "
-               f"WHERE PatientDurableKey = '{patient_id}' OR PatientKey = '{patient_id}' "
+        pid = sql_escape_literal(patient_id)
+        sql = (f"SELECT TOP {int(row_limit)} * FROM {schema}.LabComponentResultFact "
+               f"WHERE PatientDurableKey = '{pid}' "
                f"ORDER BY ResultDateKey DESC")
         result = _execute_readonly_query(clinical_config, sql, row_limit)
         return ToolResult(content=[TextContent(type="text", text=result)])

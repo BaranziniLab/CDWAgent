@@ -26,9 +26,7 @@ from fastmcp.tools.tool import ToolResult, TextContent
 from mcp.types import ToolAnnotations
 
 from cdwagent.config import ClinicalDBConfig
-from cdwagent.db import get_connection
-from cdwagent.sql_log import log_sql as _log_sql_to_file
-from cdwagent.validation import ClinicalQueryValidator
+from cdwagent.db import run_query_csv
 
 logger = logging.getLogger("CDWAgent")
 
@@ -40,26 +38,13 @@ _MAX_COHORT_SIZE = 2000  # SQL Server IN clause practical limit
 
 
 def _query_to_csv(config: ClinicalDBConfig, sql: str) -> str:
-    """Execute validated query and return CSV."""
-    if not ClinicalQueryValidator.is_read_only_clinical_query(sql):
-        raise ToolError("Only SELECT queries are allowed.")
-    _log_sql_to_file(sql)
-    conn = get_connection(config)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(sql)
-        columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        rows = cursor.fetchall()
-        cursor.close()
-    finally:
-        conn.close()
-    if not columns:
-        return "No results found."
-    csv_lines = [",".join(columns)]
-    csv_lines.extend(
-        [",".join(str(v) if v is not None else "" for v in row) for row in rows]
-    )
-    return "\n".join(csv_lines)
+    """Execute a tool-generated query and return well-formed CSV.
+
+    Delegates to db.run_query_csv so note text / snippets (which are FULL of
+    commas, quotes and newlines) get RFC-4180 quoting instead of corrupting the
+    output (C2), and so timeouts (P1) + schema-drift hints (C4) apply here too.
+    These queries are tool-generated, so read-only validation is unnecessary."""
+    return run_query_csv(config, sql)
 
 
 def _validate_cohort(keys: list[str]) -> list[str]:

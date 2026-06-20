@@ -29,15 +29,30 @@ Drag the `.brxt` file into BioRouter's **Extensions → Add extension** dialog. 
 
 ## Features
 
-- 21 MCP tools organized into 6 domain modules
+- 22 MCP tools organized into 7 domain modules
+- **One-call multimodal cohort building** (`build_cohort`) across 8 modalities:
+  diagnosis, medication, procedure, lab, **imaging/radiology**, **immunization**,
+  **allergy**, and **vitals/flowsheets** — resolves a term/code, builds the
+  correct fact-table cohort, counts patients, and returns a reusable subquery
 - 3 guided workflow prompts for common research tasks
 - OMOP → CDW patient crossmapping with birth-date sanity check
 - Read-only SQL enforcement with comprehensive write-blocking
 - Schema discovery from a pre-parsed data dictionary (no DB connection needed)
-- Clinical notes search and retrieval
-- Cohort building with aggregate demographics
+- Clinical notes search and retrieval (cTAKES concepts, SDOH, section headings, verbatim)
+- Cohort building with aggregate demographics (single-pass GROUPING SETS)
 - CSV export for large result sets
 - Configurable tool namespace and database schema
+
+### v0.5.0 reliability/perf overhaul (see `CHANGES.md`)
+
+- Per-query **timeouts** so a heavy query fails fast instead of hanging the agent
+- **RFC-4180 CSV** output (note text / comma-bearing values no longer corrupt results)
+- **Robust to schema drift**: `Invalid column/object name` errors are enriched with the
+  closest real names from the bundled schema reference
+- Correct **input escaping** (apostrophe diseases like Crohn's/Parkinson's no longer break)
+- `summarize_table` reduced from up to 51 table scans to one bounded pass
+- Patient-detail queries made index-sargable (dropped `OR PatientKey`)
+- Fixed the procedure lookup to use `ProcedureDim` (the old path could not filter the fact table)
 
 ## Tools
 
@@ -87,7 +102,13 @@ These tools resolve human-language concept names or terminology codes into the s
 | `search_diagnoses_by_code` | Resolve ICD/SNOMED codes or diagnosis names against `DiagnosisTerminologyDim` joined to `DiagnosisDim`. Returns `DiagnosisKey` values for use in `DiagnosisEventFact.DiagnosisKey IN (...)`. |
 | `search_medications_by_code` | Resolve NDC/RxNorm codes, brand names, or generic names against `MedicationCodeDim`. Returns `MedicationKey` values for use in `MedicationOrderFact.MedicationKey IN (...)`. |
 | `search_labs_by_code` | Resolve LOINC codes or lab component names (e.g. "hemoglobin a1c", "creatinine") against `LabComponentDim`. Returns `LabComponentKey` values for use in `LabComponentResultFact.LabComponentKey IN (...)`. Note the LOINC column is `LoincCode`, not `Loinc`. |
-| `search_procedures_by_code` | Resolve CPT/HCPCS codes or procedure names against `ProcedureTerminologyDim`. Returns `ProcedureTerminologyKey` values for use in `ProcedureEventFact.ProcedureTerminologyKey IN (...)`. |
+| `search_procedures_by_code` | Resolve CPT/HCPCS codes or procedure names against **`ProcedureDim`** (which carries `ProcedureKey` + `CptCode`/`HcpcsCode`/`Code`/`Name`). Returns `ProcedureKey` values for use in `ProcedureEventFact.ProcedureKey IN (...)`. Note: `ProcedureTerminologyDim` is **not** used — it has no `ProcedureKey` and cannot filter the fact table. |
+
+### Cohort Building (1)
+
+| Tool | Description |
+|------|-------------|
+| `build_cohort` | **Preferred entry point for "how many patients with X" / "find patients with X".** Resolves a clinical term or code in one call across 8 modalities — `diagnosis`, `medication`, `procedure`, `lab`, `imaging` (radiology: `ResourceModality` CT/MR/US/XR, exam name, CPT), `immunization`, `allergy`, `vital` (flowsheet measurement) — builds the correct `SELECT DISTINCT PatientDurableKey …` subquery against the right fact table, returns `patient_count`, the matched codes/names (cohort transparency), and the reusable `cohort_subquery` for composing multi-step / cross-modality questions. Optional demographic breakdown. |
 
 ### Data Export (1)
 

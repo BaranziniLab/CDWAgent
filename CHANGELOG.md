@@ -4,6 +4,68 @@ All notable changes to CDWAgent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] — 2026-06-20
+
+Major reliability, performance, and multimodal-coverage overhaul. Found and
+fixed by running the tools against the live UCSF CDW (7.17M patients). See
+`CHANGES_v0.5.0.md` and `eval/` for the full methodology.
+
+### Added
+
+- **`build_cohort` — one-call multimodal cohort builder (new tool, 22 total).**
+  Resolves a clinical term or code and returns the patient count, the matched
+  codes/names (cohort transparency), and a reusable `cohort_subquery` in a single
+  call — replacing the error-prone search→read-keys→hand-write-subquery chain.
+  Covers **8 modalities**: diagnosis, medication, procedure, lab, **imaging/
+  radiology** (`ImagingFact` — ResourceModality CT/MR/US/XR, exam name, CPT),
+  **immunization**, **allergy**, and **vitals/flowsheets**.
+- **DATA MODALITIES guide** in the server instructions routing the long tail
+  (surgical/OR, ADT/admissions/transfers, cancer staging, radiology report notes,
+  note section headings) through the `query` tool.
+- **`approximate` option** on `build_cohort` (`APPROX_COUNT_DISTINCT`, SQL Server
+  2019+, ~3× faster, ≲2% error) for quick sizing of very large cohorts; exact
+  count remains the default.
+- **Schema-drift hints**: `Invalid column/object name` errors are enriched with
+  the closest real names from the bundled schema reference, so the agent
+  self-corrects after a CDW schema change instead of looping.
+- Per-query and login **timeouts** (`CDW_QUERY_TIMEOUT`, default 180s;
+  `CDW_LOGIN_TIMEOUT`, 15s) so a heavy query fails fast instead of hanging.
+
+### Fixed
+
+- **🔴 Apostrophe / input escaping** — `search_*_by_code` interpolated the term
+  straight into `LIKE`, so `"Crohn's"`, `"Parkinson's"`, `"Graves'"` produced SQL
+  syntax errors. All terms are now escaped (verified live: Crohn's → 1,438 pts).
+- **🔴 `build_cohort` key-cap undercount** — an early `TOP 200` cap on resolved
+  keys silently dropped ~99% of codes for broad concepts: "type 2 diabetes"
+  returned 1,227 patients instead of the true ~219,352. The cap was removed.
+- **🔴 RFC-4180 CSV** — results are now properly quoted, so values containing
+  commas / quotes / newlines (note text, snippets, "Diabetes mellitus, type 2",
+  race/ethnicity) no longer corrupt the output and get misread.
+- **🔴 Procedure dead-end** — `search_procedures_by_code` queried
+  `ProcedureTerminologyDim`, which has **no** `ProcedureKey` and cannot filter
+  `ProcedureEventFact`. It now uses `ProcedureDim` (CptCode/HcpcsCode + ProcedureKey).
+- **🔴 `crossmap_patient`** no longer re-parses its own CSV with `split(',')`
+  (broke on comma-bearing race/ethnicity/datetime fields).
+- **🟠 vitals timeout** — the `vital` cohort scanned the enormous
+  `FlowsheetValueFact` with a LIKE (137s timeout). It now resolves
+  `FlowsheetRowKey` from the small `FlowsheetRowDim` first, then filters by key.
+- **🟠 `summarize_table`** — was up to 51 full table scans (COUNT(*) + one
+  COUNT(*) WHERE col IS NULL per column); now one bounded sampled pass plus an
+  instant row count from `sys.dm_db_partition_stats`.
+- **🟠 `cohort_summary`** — ran the cohort subquery 4×; now a single
+  `GROUPING SETS` pass for sex/race/ethnicity.
+- **🟠 Index-defeating `OR PatientKey`** removed from the patient-detail getters;
+  queries are now sargable on `PatientDurableKey`.
+- **🟠 Code-aware matching** — code-shaped terms (G35, 4548-4, 45378) prefix-match
+  the code column instead of a leading-wildcard scan.
+
+### Changed
+
+- All tools funnel SQL through a single `db.py` execution layer (CSV, timeouts,
+  schema hints, audit logging) — removing four near-duplicate query helpers.
+- Version `0.4.3 → 0.5.0`; tool count 21 → 22.
+
 ## [0.4.3] — 2026-04-29
 
 ### Added
