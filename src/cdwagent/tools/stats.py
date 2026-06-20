@@ -1,4 +1,14 @@
-"""Data summarization and cohort statistics tools"""
+"""Data summarization and cohort statistics tools.
+
+Performance rewrites vs. the original:
+  * P3 summarize_table — was 1 COUNT(*) + one COUNT(*) WHERE col IS NULL per
+    column (up to 51 full scans of a possibly huge fact table). Now: exact row
+    count from sys.dm_db_partition_stats (instant, no scan) + ALL null rates in
+    a SINGLE bounded pass (one scan of a TOP-N sample). O(51 scans) → O(1).
+  * P4 cohort_summary — was the cohort subquery executed 4× (count + sex + race
+    + ethnicity). Now: 1 count + 1 GROUPING SETS pass = the subquery runs twice
+    and all three demographic breakdowns come from one scan.
+"""
 
 import json
 import logging
@@ -15,6 +25,10 @@ from cdwagent.validation import ClinicalQueryValidator
 
 logger = logging.getLogger("CDWAgent")
 
+# Null-rate sampling cap. A single bounded scan keeps summarize_table fast even
+# on billion-row fact tables; null rates are estimated over this many rows.
+_NULL_SAMPLE_ROWS = 100_000
+
 
 def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: ClinicalDBConfig, schema: str = "deid_uf"):
     """Register data summarization tools"""
@@ -30,40 +44,78 @@ def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         )
     )
     def summarize_table(
-        table_name: str = Field(..., description="Table name to summarize")
+        table_name: str = Field(..., description="Table name to summarize (unqualified, e.g. 'EncounterFact')")
     ) -> ToolResult:
-        """Get summary statistics for a table: row count, column null rates, and
-        sample value distributions for key columns."""
+        """Get summary statistics for a table: exact row count plus per-column
+        null rates (estimated from a bounded sample for speed).
+
+        Fast even on very large fact tables: the row count comes from catalog
+        statistics (no scan) and null rates from a single capped scan."""
         if not table_name.replace("_", "").replace(".", "").isalnum():
             raise ToolError("Invalid table name")
 
         conn = get_connection(clinical_config)
         try:
             cursor = conn.cursor()
-
             qualified_table = f"[{schema}].[{table_name}]"
-            cursor.execute(f"SELECT COUNT(*) FROM {qualified_table}")
-            row_count = cursor.fetchone()[0]
 
-            cursor.execute(
-                f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
-                f"WHERE TABLE_SCHEMA = '{schema}' AND TABLE_NAME = '{table_name}' ORDER BY ORDINAL_POSITION"
-            )
-            columns = cursor.fetchall()
-
-            summary = {"table_name": f"{schema}.{table_name}", "row_count": row_count, "columns": []}
-            for col_name, data_type in columns[:50]:
+            # --- exact row count, no scan (P3) ---
+            try:
                 cursor.execute(
-                    f"SELECT COUNT(*) FROM {qualified_table} WHERE [{col_name}] IS NULL"
+                    "SELECT SUM(ps.row_count) FROM sys.dm_db_partition_stats ps "
+                    "JOIN sys.tables t ON ps.object_id = t.object_id "
+                    "JOIN sys.schemas s ON t.schema_id = s.schema_id "
+                    "WHERE s.name = %s AND t.name = %s AND ps.index_id IN (0,1)",
+                    (schema, table_name),
                 )
-                null_count = cursor.fetchone()[0]
-                col_summary = {
+                row = cursor.fetchone()
+                row_count = int(row[0]) if row and row[0] is not None else None
+            except Exception:
+                row_count = None
+            if row_count is None:  # fallback if catalog view is unavailable
+                cursor.execute(f"SELECT COUNT(*) FROM {qualified_table}")
+                row_count = cursor.fetchone()[0]
+
+            # --- column list ---
+            cursor.execute(
+                "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s ORDER BY ORDINAL_POSITION",
+                (schema, table_name),
+            )
+            columns = cursor.fetchall()[:50]
+            if not columns:
+                raise ToolError(
+                    f"Table '{schema}.{table_name}' has no columns / does not exist. "
+                    f"Call get_database_overview() for valid table names."
+                )
+
+            # --- all null counts in ONE bounded pass (P3) ---
+            null_exprs = ", ".join(
+                f"SUM(CASE WHEN [{c[0]}] IS NULL THEN 1 ELSE 0 END) AS [{c[0]}]"
+                for c in columns
+            )
+            cursor.execute(
+                f"SELECT COUNT(*) AS __sampled, {null_exprs} "
+                f"FROM (SELECT TOP {_NULL_SAMPLE_ROWS} * FROM {qualified_table}) s"
+            )
+            agg = cursor.fetchone()
+            sampled = agg[0] or 0
+            null_counts = agg[1:]
+
+            summary = {
+                "table_name": f"{schema}.{table_name}",
+                "row_count": row_count,
+                "null_rate_sampled_rows": sampled,
+                "columns": [],
+            }
+            for (col_name, data_type), null_count in zip(columns, null_counts):
+                nc = int(null_count or 0)
+                summary["columns"].append({
                     "name": col_name,
                     "data_type": data_type,
-                    "null_count": null_count,
-                    "null_pct": round(null_count / row_count * 100, 1) if row_count > 0 else 0,
-                }
-                summary["columns"].append(col_summary)
+                    "null_count_in_sample": nc,
+                    "null_pct": round(nc / sampled * 100, 1) if sampled else 0,
+                })
 
             cursor.close()
         finally:
@@ -94,10 +146,7 @@ def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         """Summarize a cohort defined by a subquery returning PatientDurableKey values.
 
         CRITICAL: Use PatientDurableKey (not PatientKey) in your subquery.
-        PatientKey is an SCD Type 2 surrogate that changes when demographics update —
-        fact tables stamp the PatientKey active at event time, so most old PatientKeys
-        will NOT match PatientDim WHERE IsCurrent=1. PatientDurableKey is the stable
-        identifier that persists across all SCD versions.
+        PatientKey is an SCD Type 2 surrogate that changes when demographics update.
 
         Use concept search tools first to find the right diagnosis/medication/procedure keys,
         then build a subquery to identify patient keys from the relevant fact table.
@@ -111,49 +160,41 @@ def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         try:
             cursor = conn.cursor()
 
-            # Auto-detect if query returns PatientDurableKey or PatientKey
-            # Try PatientDurableKey first (preferred)
-            count_sql = f"SELECT COUNT(DISTINCT PatientDurableKey) FROM ({patient_key_query}) sub"
+            # Detect whether the subquery exposes PatientDurableKey (preferred) or PatientKey.
             try:
-                cursor.execute(count_sql)
+                cursor.execute(f"SELECT COUNT(DISTINCT PatientDurableKey) FROM ({patient_key_query}) sub")
                 count = cursor.fetchone()[0]
                 id_column = "PatientDurableKey"
             except Exception:
-                # Fallback to PatientKey if PatientDurableKey doesn't exist in subquery
-                count_sql = f"SELECT COUNT(DISTINCT PatientKey) FROM ({patient_key_query}) sub"
-                cursor.execute(count_sql)
+                cursor.execute(f"SELECT COUNT(DISTINCT PatientKey) FROM ({patient_key_query}) sub")
                 count = cursor.fetchone()[0]
                 id_column = "PatientKey"
 
             result = {"patient_key_query": patient_key_query, "id_column": id_column, "patient_count": count}
 
             if demographics and count > 0:
-                # Use the detected id_column for joins
-                join_col = id_column
-
-                # Sex breakdown
-                sex_sql = (
-                    f"SELECT Sex, COUNT(*) AS n FROM {schema}.PatientDim "
-                    f"WHERE IsCurrent = 1 AND {join_col} IN ({patient_key_query}) GROUP BY Sex ORDER BY n DESC"
+                # P4: one GROUPING SETS pass yields sex + race + ethnicity together,
+                # so the (potentially expensive) subquery is evaluated once here
+                # instead of three times.
+                grp_sql = (
+                    f"SELECT GROUPING(Sex) gS, GROUPING(FirstRace) gR, GROUPING(Ethnicity) gE, "
+                    f"Sex, FirstRace, Ethnicity, COUNT(*) AS n "
+                    f"FROM {schema}.PatientDim "
+                    f"WHERE IsCurrent = 1 AND {id_column} IN ({patient_key_query}) "
+                    f"GROUP BY GROUPING SETS ((Sex), (FirstRace), (Ethnicity))"
                 )
-                cursor.execute(sex_sql)
-                result["sex"] = {str(row[0]): row[1] for row in cursor.fetchall()}
-
-                # Race breakdown
-                race_sql = (
-                    f"SELECT FirstRace, COUNT(*) AS n FROM {schema}.PatientDim "
-                    f"WHERE IsCurrent = 1 AND {join_col} IN ({patient_key_query}) GROUP BY FirstRace ORDER BY n DESC"
-                )
-                cursor.execute(race_sql)
-                result["race"] = {str(row[0]): row[1] for row in cursor.fetchall()}
-
-                # Ethnicity breakdown
-                eth_sql = (
-                    f"SELECT Ethnicity, COUNT(*) AS n FROM {schema}.PatientDim "
-                    f"WHERE IsCurrent = 1 AND {join_col} IN ({patient_key_query}) GROUP BY Ethnicity ORDER BY n DESC"
-                )
-                cursor.execute(eth_sql)
-                result["ethnicity"] = {str(row[0]): row[1] for row in cursor.fetchall()}
+                cursor.execute(grp_sql)
+                sex, race, eth = {}, {}, {}
+                for gS, gR, gE, sexv, racev, ethv, n in cursor.fetchall():
+                    if gS == 0:
+                        sex[str(sexv)] = n
+                    elif gR == 0:
+                        race[str(racev)] = n
+                    elif gE == 0:
+                        eth[str(ethv)] = n
+                result["sex"] = dict(sorted(sex.items(), key=lambda kv: kv[1], reverse=True))
+                result["race"] = dict(sorted(race.items(), key=lambda kv: kv[1], reverse=True))
+                result["ethnicity"] = dict(sorted(eth.items(), key=lambda kv: kv[1], reverse=True))
 
             cursor.close()
         finally:

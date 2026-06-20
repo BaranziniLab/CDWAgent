@@ -12,6 +12,7 @@ from cdwagent.tools.notes import register_notes_tools
 from cdwagent.tools.export import register_export_tools
 from cdwagent.tools.concepts import register_concept_tools
 from cdwagent.tools.stats import register_stats_tools
+from cdwagent.tools.cohort import register_cohort_tools
 
 logger = logging.getLogger("CDWAgent")
 
@@ -70,6 +71,31 @@ Clinical notes:
   deid_uf.note_metadata — metadata. Join: deid_note_key. Filter: enc_dept_specialty.
   deid_uf.note_text     — full text. Join on deid_note_key.
 
+>>> DATA MODALITIES (the CDW is far more than dx/meds/labs) <<<
+build_cohort(domain=…) reaches eight modalities directly: diagnosis, medication,
+procedure, lab, imaging, immunization, allergy, vital. For the long tail, query
+these fact tables directly (all keyed by PatientDurableKey):
+  - Radiology / imaging .... deid_uf.ImagingFact (ResourceModality = CT/MR/US/XR/etc.,
+                             FirstProcedureName, FirstProcedureCptCode, IsAbnormal,
+                             ExamStartDateKey). The radiology REPORT TEXT lives in the
+                             note tables — filter note_metadata.note_type for imaging/
+                             radiology and use search_notes / search_note_concepts.
+  - Vitals / flowsheets .... deid_uf.FlowsheetValueFact (FlowsheetRowName e.g. 'BP',
+                             'Weight', 'Pain Score'; Value/NumericValue; DateKey).
+  - Immunizations .......... deid_uf.ImmunizationEventFact (ImmunizationName, Type,
+                             AdministrationDateKey).
+  - Allergies .............. deid_uf.AllergyFact (AllergenName, AllergenType, Severity,
+                             FirstReaction; join AllergenDim for the catalog).
+  - Surgery / OR ........... deid_uf.SurgicalCaseFact, SurgicalProcedureEventFact,
+                             AnesthesiaRecordFact.
+  - Admissions / ADT ....... deid_uf.HospitalAdmissionFact, PatientLocationEventFact
+                             (transfers, unit/ICU stays), VisitFact (appointments).
+  - Cancer staging ......... deid_uf.CancerStagingFact.
+  - Note section headings .. deid_uf.note_concepts_headings (find notes by section,
+                             e.g. 'Assessment', 'Social History', 'Family History').
+Many questions are MULTIMODAL: build a structured cohort (build_cohort), then join
+its PatientDurableKeys against notes/imaging/vitals to reconcile codes vs. reality.
+
 >>> PERFORMANCE <<<
 - Use subquery pattern for cohort joins (above). CTE+JOIN also timeout.
 - SQL Server syntax: SELECT DISTINCT TOP N (not SELECT TOP N DISTINCT).
@@ -78,8 +104,20 @@ Clinical notes:
 - Stay in one schema (deid_uf) — cross-schema joins timeout.
 
 >>> TOOL HINT <<<
+- COHORT QUESTIONS — START HERE. For "how many patients with X" / "find patients
+  on X", call build_cohort(concept, domain) FIRST. It resolves the term/code,
+  builds the correct fact-table subquery, and returns the patient_count plus a
+  reusable `cohort_subquery` string in ONE call — no manual code-lookup→subquery
+  chaining. domain ∈ {diagnosis, medication, procedure, lab}. Compose multi-step
+  questions by reusing the returned cohort_subquery (intersect, add date windows,
+  pass to cohort_summary, or feed its keys to the note tools).
 - For table metadata beyond this list: call describe_table(table_name) or get_database_overview().
-- For code/concept lookup: search_diagnoses_by_code (ICD/SNOMED), search_medications_by_code (NDC/RxNorm/brand/generic), search_labs_by_code (LOINC), search_procedures_by_code (CPT/HCPCS). Each returns a *Key column to use in IN (...) cohort filters on the corresponding fact table.
+- For raw code/concept lookup (when build_cohort isn't enough): search_diagnoses_by_code
+  (ICD/SNOMED), search_medications_by_code (NDC/RxNorm/brand/generic), search_labs_by_code
+  (LOINC), search_procedures_by_code (CPT/HCPCS). Each returns a *Key column to use in
+  IN (...) cohort filters on the corresponding fact table. NOTE: procedures resolve via
+  ProcedureDim (it has ProcedureKey + CptCode/HcpcsCode); ProcedureTerminologyDim has NO
+  ProcedureKey and cannot filter ProcedureEventFact.
 - For OMOP→CDW patient resolution: crossmap_patient(person_id).
 
 >>> NOTES — DECISION TREE FOR PATIENT-NOTE QUERIES <<<
@@ -171,6 +209,7 @@ def create_cdw_server(config: CDWConfig) -> FastMCP:
     register_export_tools(mcp, ns, db_config)
     register_concept_tools(mcp, ns, db_config, schema)
     register_stats_tools(mcp, ns, db_config, schema)
+    register_cohort_tools(mcp, ns, db_config, schema)
 
     # MCP Prompts
     @mcp.prompt("clinical_data_exploration")

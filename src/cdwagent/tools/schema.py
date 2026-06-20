@@ -16,7 +16,9 @@ _SCHEMA_REF_PATH = Path(__file__).parent.parent / "data" / "schema_reference.jso
 _schema_ref: Optional[dict] = None
 
 
-def _get_schema_ref() -> dict:
+def get_schema_ref() -> dict:
+    """Load and cache the bundled CDW schema reference (public; used by db.py
+    for schema-drift hinting as well as by the schema tools)."""
     global _schema_ref
     if _schema_ref is None:
         if not _SCHEMA_REF_PATH.exists():
@@ -24,6 +26,10 @@ def _get_schema_ref() -> dict:
         with open(_SCHEMA_REF_PATH) as f:
             _schema_ref = json.load(f)
     return _schema_ref
+
+
+# Backwards-compatible private alias.
+_get_schema_ref = get_schema_ref
 
 
 def register_schema_tools(mcp: FastMCP, namespace_prefix: str):

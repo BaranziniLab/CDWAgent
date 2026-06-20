@@ -2,10 +2,10 @@
   "name": "cdwagent",
   "display_name": "CDWAgent",
   "description": "Read-only MCP access to UCSF Epic Caboodle Clinical Data Warehouse.",
-  "version": "0.4.3",
+  "version": "0.5.0",
   "entry_point": "cdwagent",
   "repository": "https://github.com/BaranziniLab/CDWAgent",
-  "tools_count": 21,
+  "tools_count": 22,
   "env_vars": [
     {
       "key": "CLINICAL_RECORDS_USERNAME",
