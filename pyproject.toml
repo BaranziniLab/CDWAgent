@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cdwagent"
-version = "0.5.0"
+version = "0.5.1"
 description = "MCP server for a de-identified Epic Caboodle Clinical Data Warehouse (SQL Server, read-only). BioRouter extension, sibling of UCSFOMOPAgent."
 readme = "README.md"
 license = {text = "MIT"}

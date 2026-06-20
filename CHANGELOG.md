@@ -4,6 +4,25 @@ All notable changes to CDWAgent are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-06-20
+
+### Performance (build_cohort key resolution — live-CDW measured)
+
+- **Name terms** now resolve diagnosis/medication keys from the small name
+  dimension (`DiagnosisDim.Name` / `MedicationDim.Name`) **UNION** the terminology
+  table's `DisplayString`. This keeps **full recall** (DisplayString carries the
+  ICD/SNOMED/CMS synonyms the abbreviated dim Name misses) while dropping the
+  old 3-column JOIN that also scanned the code column:
+  - "type 2 diabetes" 219,352 patients in ~17s (was ~57s), same count.
+  - "metformin" ~10s (was ~16s); "atorvastatin" ~9s.
+- **Code terms** (ICD/SNOMED/NDC) prefix-match **only** the code column; the
+  human-readable `DisplayString` is shown as a label but no longer scanned with a
+  pointless leading-wildcard `LIKE` (which had regressed code lookups to a 180s
+  timeout). `G35` 13,516 / `I10` 457,980 / `E11.9` 166,530 — each ~3s.
+
+No behavior change to counts vs. the v0.5.0 full-recall path; this is purely a
+key-resolution speedup, verified against the live UCSF CDW.
+
 ## [0.5.0] — 2026-06-20
 
 Major reliability, performance, and multimodal-coverage overhaul. Found and

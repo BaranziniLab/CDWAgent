@@ -37,7 +37,7 @@ from mcp.types import ToolAnnotations
 
 from cdwagent.config import ClinicalDBConfig
 from cdwagent.db import run_rows
-from cdwagent.tools.concepts import _match_clause
+from cdwagent.tools.concepts import _match_clause, _looks_like_code
 
 logger = logging.getLogger("CDWAgent")
 
@@ -48,72 +48,86 @@ VALID_DOMAINS = ["diagnosis", "medication", "procedure", "lab",
 def register_cohort_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: ClinicalDBConfig, schema: str = "deid_uf"):
     """Register the high-level build_cohort tool."""
 
-    def recipe(domain: str) -> dict:
+    def recipe(domain: str, is_code: bool = False) -> dict:
         s = schema
-        # kind="dim": match on a dimension, filter fact by a key.
-        # kind="fact": the descriptive name lives in the fact; match it directly.
+        # Two recipe shapes:
+        #   kind="dim"  — resolve keys from one or more dimension `sources`
+        #                 (UNIONed), then filter the fact by `fact_key IN (...)`.
+        #   kind="fact" — the descriptive name lives in the fact; match directly.
+        #
+        # PERF + RECALL (diagnosis/medication name terms): keys are resolved from
+        # the SMALL name dimension (DiagnosisDim.Name / MedicationDim.Name) UNION
+        # the terminology table's DisplayString. The UNION keeps FULL recall (the
+        # DisplayString carries ICD/SNOMED/CMS synonyms that the abbreviated dim
+        # Name misses) while being ~6x faster than the old 3-column JOIN that also
+        # scanned the code column — "type 2 diabetes" 219,352 pts in ~9s vs ~57s.
+        # CODE terms (ICD/SNOMED/NDC) resolve from the terminology/code table,
+        # where the codes live, via a sargable prefix match.
+        each = lambda **kw: kw
         recipes = {
-            "diagnosis": {
-                "kind": "dim",
-                "dim_from": f"{s}.DiagnosisTerminologyDim dt JOIN {s}.DiagnosisDim dd ON dt.DiagnosisKey = dd.DiagnosisKey",
-                "key": "dt.DiagnosisKey", "code_cols": ["dt.Value", "dt.DisplayString"], "name_cols": ["dd.Name"],
-                "sample_cols": "dt.Type AS terminology, dt.Value AS code, dd.Name AS name",
-                "fact": "DiagnosisEventFact", "fact_key": "DiagnosisKey",
-            },
-            "medication": {
-                "kind": "dim",
-                "dim_from": f"{s}.MedicationCodeDim mc",
-                "key": "mc.MedicationKey", "code_cols": ["mc.Code"],
-                "name_cols": ["mc.MedicationName", "mc.MedicationGenericName"],
-                "sample_cols": "mc.Type AS terminology, mc.Code AS code, mc.MedicationName AS name",
-                "fact": "MedicationOrderFact", "fact_key": "MedicationKey",
-            },
-            "procedure": {
-                "kind": "dim",
-                "dim_from": f"{s}.ProcedureDim pd",
-                "key": "pd.ProcedureKey", "code_cols": ["pd.CptCode", "pd.HcpcsCode", "pd.Code"], "name_cols": ["pd.Name"],
-                "sample_cols": "pd.CptCode AS code, pd.Name AS name",
-                "fact": "ProcedureEventFact", "fact_key": "ProcedureKey",
-            },
-            "lab": {
-                "kind": "dim",
-                "dim_from": f"{s}.LabComponentDim lc",
-                "key": "lc.LabComponentKey", "code_cols": ["lc.LoincCode"], "name_cols": ["lc.Name", "lc.BaseName"],
-                "sample_cols": "lc.LoincCode AS code, lc.Name AS name",
-                "fact": "LabComponentResultFact", "fact_key": "LabComponentKey",
-            },
+            "diagnosis": each(
+                kind="dim", fact="DiagnosisEventFact", fact_key="DiagnosisKey",
+                sources=([
+                    # code term: prefix-match ONLY the code column (sargable);
+                    # DisplayString is the human label, not searched (a contains
+                    # scan of it for a code is a useless full scan that timed out).
+                    each(frm=f"{s}.DiagnosisTerminologyDim dt", key="dt.DiagnosisKey",
+                         code_cols=["dt.Value"], name_cols=[], label="dt.DisplayString"),
+                ] if is_code else [
+                    each(frm=f"{s}.DiagnosisDim dd", key="dd.DiagnosisKey",
+                         code_cols=[], name_cols=["dd.Name"], label="dd.Name"),
+                    each(frm=f"{s}.DiagnosisTerminologyDim dt", key="dt.DiagnosisKey",
+                         code_cols=[], name_cols=["dt.DisplayString"], label="dt.DisplayString"),
+                ]),
+            ),
+            "medication": each(
+                kind="dim", fact="MedicationOrderFact", fact_key="MedicationKey",
+                sources=([
+                    each(frm=f"{s}.MedicationCodeDim mc", key="mc.MedicationKey",
+                         code_cols=["mc.Code"], name_cols=[], label="mc.MedicationName"),
+                ] if is_code else [
+                    each(frm=f"{s}.MedicationDim md", key="md.MedicationKey",
+                         code_cols=[], name_cols=["md.Name"], label="md.Name"),
+                    each(frm=f"{s}.MedicationCodeDim mc", key="mc.MedicationKey",
+                         code_cols=[], name_cols=["mc.MedicationName", "mc.MedicationGenericName"], label="mc.MedicationName"),
+                ]),
+            ),
+            "procedure": each(
+                kind="dim", fact="ProcedureEventFact", fact_key="ProcedureKey",
+                sources=[each(frm=f"{s}.ProcedureDim pd", key="pd.ProcedureKey",
+                              code_cols=["pd.CptCode", "pd.HcpcsCode", "pd.Code"],
+                              name_cols=["pd.Name"], label="pd.Name")],
+            ),
+            "lab": each(
+                kind="dim", fact="LabComponentResultFact", fact_key="LabComponentKey",
+                sources=[each(frm=f"{s}.LabComponentDim lc", key="lc.LabComponentKey",
+                              code_cols=["lc.LoincCode"], name_cols=["lc.Name", "lc.BaseName"], label="lc.Name")],
+            ),
+            # vital resolves FlowsheetRowKey from the small FlowsheetRowDim FIRST,
+            # then filters the enormous FlowsheetValueFact by that indexed key —
+            # a direct LIKE scan of the value fact timed out (>137s).
+            "vital": each(
+                kind="dim", fact="FlowsheetValueFact", fact_key="FlowsheetRowKey",
+                sources=[each(frm=f"{s}.FlowsheetRowDim fr", key="fr.FlowsheetRowKey",
+                              code_cols=[], name_cols=["fr.Name", "fr.DisplayName"], label="fr.Name")],
+            ),
             # ---- self-describing fact tables (multimodal) ----
-            "imaging": {
-                "kind": "fact", "fact": "ImagingFact",
-                "code_cols": ["FirstProcedureCptCode"],
-                "name_cols": ["FirstProcedureName", "ResourceModality", "FirstProcedureCategory"],
-                "sample_cols": "ResourceModality AS modality, FirstProcedureName AS name, FirstProcedureCptCode AS code",
-            },
-            "immunization": {
-                "kind": "fact", "fact": "ImmunizationEventFact",
-                "code_cols": [],
-                "name_cols": ["ImmunizationName", "ImmunizationType"],
-                "sample_cols": "ImmunizationName AS name, ImmunizationType AS type",
-            },
-            "allergy": {
-                "kind": "fact", "fact": "AllergyFact",
-                "code_cols": [],
-                "name_cols": ["AllergenName", "AllergenType"],
-                "sample_cols": "AllergenName AS name, AllergenType AS type, Severity AS severity",
-            },
-            # vital uses the small FlowsheetRowDim to resolve FlowsheetRowKey(s)
-            # FIRST, then filters FlowsheetValueFact by that indexed key. Matching
-            # the denormalized name directly on the (enormous) value fact with a
-            # LIKE scan times out (>137s observed); the keyed path is ~seconds.
-            "vital": {
-                "kind": "dim",
-                "dim_from": f"{s}.FlowsheetRowDim fr",
-                "key": "fr.FlowsheetRowKey",
-                "code_cols": [],
-                "name_cols": ["fr.Name", "fr.DisplayName"],
-                "sample_cols": "fr.Name AS name, fr.Unit AS unit",
-                "fact": "FlowsheetValueFact", "fact_key": "FlowsheetRowKey",
-            },
+            "imaging": each(
+                kind="fact", fact="ImagingFact",
+                code_cols=["FirstProcedureCptCode"],
+                name_cols=["FirstProcedureName", "ResourceModality", "FirstProcedureCategory"],
+                sample_cols="ResourceModality AS modality, FirstProcedureName AS name, FirstProcedureCptCode AS code",
+            ),
+            "immunization": each(
+                kind="fact", fact="ImmunizationEventFact", code_cols=[],
+                name_cols=["ImmunizationName", "ImmunizationType"],
+                sample_cols="ImmunizationName AS name, ImmunizationType AS type",
+            ),
+            "allergy": each(
+                kind="fact", fact="AllergyFact", code_cols=[],
+                name_cols=["AllergenName", "AllergenType"],
+                sample_cols="AllergenName AS name, AllergenType AS type, Severity AS severity",
+            ),
         }
         if domain not in recipes:
             raise ToolError(f"Unknown domain '{domain}'. Use one of: {', '.join(VALID_DOMAINS)}.")
@@ -156,18 +170,31 @@ def register_cohort_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: 
         (`SELECT DISTINCT PatientDurableKey FROM …`) for composing multi-step or
         cross-modality questions (intersect, add date/value filters, pass to
         cohort_summary, or feed its keys to the note tools)."""
-        r = recipe(domain)
-        where = _match_clause(concept, r["code_cols"], r["name_cols"])
+        r = recipe(domain, is_code=_looks_like_code(concept))
 
         if r["kind"] == "dim":
-            sample_sql = f"SELECT TOP 25 {r['sample_cols']} FROM {r['dim_from']} WHERE {where}"
-            # IMPORTANT: no TOP cap on the key set. A broad concept ("diabetes")
-            # matches thousands of codes; capping the keys silently dropped ~99%
-            # of them and undercounted patients by >100x. SQL Server handles a
-            # large IN-subquery as a semi-join efficiently, so resolve ALL keys.
-            key_subq = f"SELECT {r['key']} FROM {r['dim_from']} WHERE {where}"
+            # Resolve keys from each source and UNION them (full recall). No TOP
+            # cap on the key set — a broad concept matches thousands of codes and
+            # capping silently undercounted patients by >100x; SQL Server handles
+            # a large IN-subquery as a semi-join efficiently.
+            def _src_where(src):
+                return _match_clause(concept, src["code_cols"], src["name_cols"])
+            key_subq = " UNION ".join(
+                f"SELECT {src['key']} FROM {src['frm']} WHERE {_src_where(src)}"
+                for src in r["sources"]
+            )
             fact_filter = f"{r['fact_key']} IN ({key_subq})"
+            # sample drives transparency AND shares the key recall (so it can never
+            # be empty while keys exist): same sources, returning a label column.
+            sample_sql = (
+                "SELECT DISTINCT TOP 25 label FROM (" +
+                " UNION ".join(
+                    f"SELECT {src['label']} AS label FROM {src['frm']} WHERE {_src_where(src)}"
+                    for src in r["sources"]
+                ) + ") u"
+            )
         else:  # kind == "fact" — match the descriptive name directly in the fact
+            where = _match_clause(concept, r["code_cols"], r["name_cols"])
             sample_sql = f"SELECT DISTINCT TOP 25 {r['sample_cols']} FROM {schema}.{r['fact']} WHERE {where}"
             fact_filter = where
         cohort_subquery = (
@@ -176,7 +203,10 @@ def register_cohort_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: 
 
         # 1. transparency — what did we match?
         scols, srows = run_rows(clinical_config, sample_sql)
-        matched = [dict(zip(scols, row)) for row in srows]
+        if r["kind"] == "dim":
+            matched = [row[0] for row in srows]
+        else:
+            matched = [dict(zip(scols, row)) for row in srows]
         if not matched:
             return ToolResult(content=[TextContent(type="text", text=json.dumps({
                 "concept": concept, "domain": domain, "patient_count": 0, "matched_concepts": [],
