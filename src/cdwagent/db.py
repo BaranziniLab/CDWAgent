@@ -75,8 +75,8 @@ def get_connection(config: ClinicalDBConfig):
             timeout=QUERY_TIMEOUT_S,
         )
     except Exception as e:
-        logger.error(f"Database connection failed: {e}")
-        raise ToolError(f"Database connection failed: {e}")
+        logger.error("Database connection failed (%s)", type(e).__name__)
+        raise ToolError("Database connection failed. Check network/VPN access and the configured credentials.") from None
 
 
 # --------------------------------------------------------------------------
@@ -150,7 +150,13 @@ def run_rows(config: ClinicalDBConfig, sql: str, row_limit: int | None = None):
         return columns, rows
     except Exception as e:
         msg = str(e)
-        raise ToolError(f"Query failed: {msg}{_schema_hint(msg)}")
+        if config.password:
+            msg = msg.replace(config.password, "[redacted]")
+        hint = _schema_hint(msg)
+        if "timeout" in msg.lower() or "timed out" in msg.lower():
+            hint += ("\nUse submit_query_job for this query and monitor query_job_status. "
+                     "Inspect its plan or narrow filters before retrying; do not duplicate active jobs.")
+        raise ToolError(f"Query failed: {msg}{hint}") from None
     finally:
         conn.close()
 
@@ -169,7 +175,14 @@ def rows_to_csv(columns: list[str], rows: list) -> str:
 
 def run_query_csv(config: ClinicalDBConfig, sql: str, row_limit: int | None = None) -> str:
     """Execute SQL and return well-formed CSV (C2 + C4 + P1 in one call)."""
-    columns, rows = run_rows(config, sql, row_limit=row_limit)
+    if row_limit is not None and not 1 <= row_limit <= 1000:
+        raise ToolError("row_limit must be between 1 and 1000; use submit_query_job for complete results.")
+    columns, rows = run_rows(config, sql, row_limit=row_limit + 1 if row_limit is not None else None)
     if not columns:
         return "No results found."
-    return rows_to_csv(columns, rows)
+    truncated = row_limit is not None and len(rows) > row_limit
+    result = rows_to_csv(columns, rows[:row_limit] if row_limit is not None else rows)
+    if truncated:
+        result = (f"[NOTICE: Preview truncated to {row_limit} rows. Use submit_query_job "
+                  "for complete results.]\n" + result)
+    return result

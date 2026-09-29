@@ -2,12 +2,15 @@
 
 import csv
 import logging
+import os
+import tempfile
 from pathlib import Path
 
 from pydantic import Field
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
-from fastmcp.tools.tool import ToolResult, TextContent
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
 from mcp.types import ToolAnnotations
 
 from cdwagent.config import ClinicalDBConfig
@@ -48,16 +51,22 @@ def register_export_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: 
         Schema rule (same as query tool): prefix every table with 'deid_uf.'.
         See server instructions for full schema context.
 
-        The directory must already exist. Returns the number of rows exported and the file path."""
+        This synchronous compatibility tool is for small, quick exports only. For large or
+        uncertain workloads use submit_query_job and poll query_job_status instead.
+        The directory must already exist; existing files are never overwritten.
+        Returns the number of rows exported and the file path only after completion."""
         if not ClinicalQueryValidator.is_read_only_clinical_query(sql_query):
             raise ToolError("Only SELECT queries are allowed for export.")
 
         output_path = Path(filepath)
+        if output_path.exists() or output_path.is_symlink():
+            raise ToolError("Output path already exists; choose a new filename.")
         if not output_path.parent.exists():
             raise ToolError(f"Directory does not exist: {output_path.parent}")
 
         _log_sql_to_file(sql_query)
         conn = get_connection(clinical_config)
+        temporary_path = None
         try:
             cursor = conn.cursor()
             cursor.execute(sql_query)
@@ -67,7 +76,10 @@ def register_export_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: 
                 return ToolResult(content=[TextContent(type="text", text="Query returned no results. No file created.")])
 
             row_count = 0
-            with open(output_path, "w", newline="") as f:
+            with tempfile.NamedTemporaryFile(mode="w", newline="", encoding="utf-8",
+                                             dir=output_path.parent, prefix=".cdw-export-",
+                                             delete=False) as f:
+                temporary_path = Path(f.name)
                 writer = csv.writer(f)
                 writer.writerow(columns)
                 while True:
@@ -77,8 +89,14 @@ def register_export_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: 
                     writer.writerows(rows)
                     row_count += len(rows)
 
+                f.flush()
+                os.fsync(f.fileno())
+            # Linking publishes a complete private file without overwriting an existing path.
+            os.link(temporary_path, output_path)
             cursor.close()
         finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
             conn.close()
 
         return ToolResult(content=[TextContent(

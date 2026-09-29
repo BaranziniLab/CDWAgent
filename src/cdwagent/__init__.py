@@ -1,12 +1,10 @@
-"""
-CDWAgent - Clinical Data Warehouse MCP Server
+"""CDWAgent database connector."""
+__version__ = "0.6.0"
+__all__ = ['create_cdw_server', 'main', 'CDWConfig', '__version__']
 
-An MCP server for querying a de-identified Epic Caboodle Clinical Data Warehouse.
-"""
 
-__version__ = "0.5.1"
-
-from cdwagent.config import CDWConfig
-from cdwagent.server import create_cdw_server, main
-
-__all__ = ["create_cdw_server", "main", "CDWConfig", "__version__"]
+def __getattr__(name):
+    if name in __all__:
+        from . import server
+        return getattr(server, name)
+    raise AttributeError(name)

@@ -1,6 +1,7 @@
 """CDWAgent server — creates FastMCP and registers all tool modules"""
 
 import logging
+import re
 from typing import Literal, Optional
 
 from fastmcp.server import FastMCP
@@ -13,6 +14,8 @@ from cdwagent.tools.export import register_export_tools
 from cdwagent.tools.concepts import register_concept_tools
 from cdwagent.tools.stats import register_stats_tools
 from cdwagent.tools.cohort import register_cohort_tools
+
+from cdwagent.jobs import INSTRUCTIONS as JOB_INSTRUCTIONS, register_job_tools
 
 logger = logging.getLogger("CDWAgent")
 
@@ -46,7 +49,7 @@ All *DateKey columns are YYYYMMDD integers:
 Filter invalid: WHERE StartDateKey > 19000101.
 
 >>> KEY TABLES (14 of 139 — call get_database_overview for the long tail) <<<
-Dimensions (SCD2, filter IsCurrent=1):
+Dimensions (PatientDim is SCD2: filter IsCurrent=1; inspect other dimensions before applying this filter):
   deid_uf.PatientDim             — demographics (PatientKey, PatientDurableKey, Sex,
                                     BirthDate, DeathDate, FirstRace, Ethnicity, Status)
   deid_uf.LabComponentDim        — lab dictionary (LOINC: LoincCode, not Loinc)
@@ -82,7 +85,7 @@ these fact tables directly (all keyed by PatientDurableKey):
                              radiology and use search_notes / search_note_concepts.
   - Vitals / flowsheets .... deid_uf.FlowsheetValueFact (FlowsheetRowName e.g. 'BP',
                              'Weight', 'Pain Score'; Value/NumericValue; DateKey).
-  - Immunizations .......... deid_uf.ImmunizationEventFact (ImmunizationName, Type,
+  - Immunizations .......... deid_uf.ImmunizationEventFact (ImmunizationName, ImmunizationType,
                              AdministrationDateKey).
   - Allergies .............. deid_uf.AllergyFact (AllergenName, AllergenType, Severity,
                              FirstReaction; join AllergenDim for the catalog).
@@ -108,7 +111,7 @@ its PatientDurableKeys against notes/imaging/vitals to reconcile codes vs. reali
   on X", call build_cohort(concept, domain) FIRST. It resolves the term/code,
   builds the correct fact-table subquery, and returns the patient_count plus a
   reusable `cohort_subquery` string in ONE call — no manual code-lookup→subquery
-  chaining. domain ∈ {diagnosis, medication, procedure, lab}. Compose multi-step
+  chaining. domain ∈ {diagnosis, medication, procedure, lab, imaging, immunization, allergy, vital}. Compose multi-step
   questions by reusing the returned cohort_subquery (intersect, add date windows,
   pass to cohort_summary, or feed its keys to the note tools).
 - For table metadata beyond this list: call describe_table(table_name) or get_database_overview().
@@ -193,9 +196,11 @@ def _format_namespace(namespace: str) -> str:
 
 def create_cdw_server(config: CDWConfig) -> FastMCP:
     """Create CDWAgent server with all tool modules registered"""
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", config.db_schema):
+        raise ValueError("CDW_SCHEMA must be a simple SQL schema identifier")
     logging.basicConfig(level=getattr(logging, config.log_level.upper()))
 
-    mcp = FastMCP("CDWAgent", instructions=CDW_SERVER_INSTRUCTIONS)
+    mcp = FastMCP("CDWAgent", instructions=CDW_SERVER_INSTRUCTIONS.replace("deid_uf", config.db_schema) + JOB_INSTRUCTIONS)
     ns = _format_namespace(config.namespace)
 
     # Schema tools (bundled reference, no DB connection needed)
@@ -220,7 +225,8 @@ def create_cdw_server(config: CDWConfig) -> FastMCP:
             "1. First, show me the database overview to understand available tables\n"
             "2. Search the schema for tables related to my topic of interest\n"
             "3. Describe the relevant tables to understand their columns\n"
-            "4. Write and execute queries to retrieve the data I need\n\n"
+            "4. Run a bounded preview; use submit_query_job for exports or uncertain-cost queries\n"
+            "5. Poll query_job_status at recommended_poll_seconds until completed; report failures and incomplete results\n\n"
             f"All tables are in the {schema} schema (e.g., {schema}.PatientDim).\n\n"
             "CRITICAL — PATIENT IDENTIFIERS:\n"
             "- PatientDurableKey is the STABLE patient identifier. Always use it for cohort queries.\n"
@@ -266,7 +272,8 @@ def create_cdw_server(config: CDWConfig) -> FastMCP:
             "3. Use cohort_summary with the patient_key_query to get counts and demographics\n"
             f"4. Retrieve demographics: SELECT ... FROM {schema}.PatientDim WHERE IsCurrent = 1 AND PatientDurableKey IN (subquery)\n"
             "5. For clinical details (labs, meds, encounters): filter fact tables WHERE PatientDurableKey IN (subquery)\n"
-            "6. Export results to CSV\n\n"
+            "6. Export with submit_query_job(format='csv'); monitor query_job_status until completed\n"
+            "   Do not run a costly count only for an ETA. Do not duplicate active jobs.\n\n"
             "KEY COLUMN NAMES:\n"
             "- PatientDim: PatientKey, PatientDurableKey, Sex, BirthDate, DeathDate, FirstRace, Ethnicity\n"
             "- EncounterFact: Type (not EncounterType), DepartmentName, DepartmentSpecialty, DateKey, PatientDurableKey\n"
@@ -286,13 +293,16 @@ def create_cdw_server(config: CDWConfig) -> FastMCP:
             "then use search_notes with that key.\n\n"
             "WORKFLOW:\n"
             "1. Identify the patient's PatientDurableKey from PatientDim\n"
-            "2. Search for notes containing specific keywords or concepts\n"
+            "2. Use search_note_concepts for clinical concepts, search_note_sdoh for social determinants,\n"
+            "   or search_notes for verbatim review, scoped to the patient cohort\n"
             "3. Review note metadata (note_type, encounter_type, enc_dept_specialty, deid_service_date)\n"
             "4. Read full note text for relevant findings using get_note\n"
-            "5. Summarize patterns across multiple notes\n\n"
+            "5. Summarize patterns, disclose NLP exclusions and population sampling notices\n"
+            "6. For expensive population queries or exports, submit_query_job and poll query_job_status\n\n"
             "What patient or keyword should we start searching for?"
         )
 
+    register_job_tools(mcp, "cdwagent", config.clinical_db.model_dump(), prefix=ns)
     return mcp
 
 
@@ -338,7 +348,10 @@ def main(
     logger.info(f"Database: {clinical_db.server}/{clinical_db.database}")
 
     mcp = create_cdw_server(config)
-    mcp.run()
+    if transport == "stdio":
+        mcp.run(transport=transport)
+    else:
+        mcp.run(transport=transport, host=host, port=port, path=path)
 
 
 if __name__ == "__main__":

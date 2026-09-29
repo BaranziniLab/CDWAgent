@@ -17,7 +17,9 @@ import re
 
 from pydantic import Field
 from fastmcp.server import FastMCP
-from fastmcp.tools.tool import ToolResult, TextContent
+from fastmcp.exceptions import ToolError
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
 from mcp.types import ToolAnnotations
 
 from cdwagent.config import ClinicalDBConfig
@@ -39,6 +41,9 @@ def _looks_like_code(term: str) -> bool:
 def _match_clause(term: str, code_cols: list[str], name_cols: list[str]) -> str:
     """Build an OR'd LIKE clause: prefix match on code columns for code-shaped
     terms (sargable), contains match on name columns always."""
+    term = term.strip()
+    if not term:
+        raise ToolError("Provide a non-empty clinical term or code; empty searches scan the entire catalog.")
     esc = sql_escape_like(term)
     parts = []
     if _looks_like_code(term):
@@ -68,7 +73,7 @@ def register_concept_tools(mcp: FastMCP, namespace_prefix: str, clinical_config:
     )
     def search_diagnoses_by_code(
         search_term: str = Field(..., description="ICD/SNOMED code (e.g. 'G35', 'E11.9') or diagnosis name (e.g. \"Crohn's disease\") to search for"),
-        row_limit: int = Field(50, description="Maximum results to return")
+        row_limit: int = Field(50, ge=1, le=1000, description="Maximum results to return")
     ) -> ToolResult:
         """Search diagnoses matching a code or name.
         Joins DiagnosisTerminologyDim (codes) with DiagnosisDim (names).
@@ -96,7 +101,7 @@ def register_concept_tools(mcp: FastMCP, namespace_prefix: str, clinical_config:
     )
     def search_medications_by_code(
         search_term: str = Field(..., description="Drug code (NDC/RxNorm), brand name, or generic name to search for"),
-        row_limit: int = Field(50, description="Maximum results to return")
+        row_limit: int = Field(50, ge=1, le=1000, description="Maximum results to return")
     ) -> ToolResult:
         """Search MedicationCodeDim for medications matching a code or name.
         Returns medication keys, names, codes, generic names, and therapeutic classes.
@@ -127,7 +132,7 @@ def register_concept_tools(mcp: FastMCP, namespace_prefix: str, clinical_config:
     )
     def search_labs_by_code(
         search_term: str = Field(..., description="LOINC code (e.g. '4548-4' for HbA1c) or lab component name (e.g. 'hemoglobin a1c', 'creatinine')"),
-        row_limit: int = Field(50, description="Maximum results to return")
+        row_limit: int = Field(50, ge=1, le=1000, description="Maximum results to return")
     ) -> ToolResult:
         """Search LabComponentDim for laboratory components matching a LOINC code or name.
 
@@ -157,7 +162,7 @@ def register_concept_tools(mcp: FastMCP, namespace_prefix: str, clinical_config:
     )
     def search_procedures_by_code(
         search_term: str = Field(..., description="CPT/HCPCS code (e.g. '45378') or procedure name to search for"),
-        row_limit: int = Field(50, description="Maximum results to return")
+        row_limit: int = Field(50, ge=1, le=1000, description="Maximum results to return")
     ) -> ToolResult:
         """Search ProcedureDim for procedures matching a code or name.
 

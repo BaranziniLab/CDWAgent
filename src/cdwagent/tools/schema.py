@@ -5,9 +5,12 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from pydantic import Field
+
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
-from fastmcp.tools.tool import ToolResult, TextContent
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
 from mcp.types import ToolAnnotations
 
 logger = logging.getLogger("CDWAgent")
@@ -32,145 +35,164 @@ def get_schema_ref() -> dict:
 _get_schema_ref = get_schema_ref
 
 
+_SOURCE = "Bundled data dictionary; not a live database inspection. Verify drift against the deployed view."
+_DESCRIPTION_LIMIT = 180
+
+
+def _description(text, detail):
+    text = text or ""
+    return {
+        "description": text if detail else text[:_DESCRIPTION_LIMIT],
+        "description_truncated": not detail and len(text) > _DESCRIPTION_LIMIT,
+    }
+
+
+def _page(items, offset, limit, detail, **metadata):
+    selected = items[offset:offset + limit]
+    end = offset + len(selected)
+    result = {
+        "source": _SOURCE,
+        **metadata,
+        "detail": detail,
+        "total": len(items),
+        "offset": offset,
+        "limit": limit,
+        "returned": len(selected),
+        "has_more": end < len(items),
+        "next_offset": end if end < len(items) else None,
+        "results": selected,
+    }
+    return ToolResult(content=[TextContent(type="text", text=json.dumps(result, ensure_ascii=False, separators=(",", ":")))])
+
+
 def register_schema_tools(mcp: FastMCP, namespace_prefix: str):
-    """Register schema discovery tools on the FastMCP instance"""
+    """Register paginated access to the bundled CDW dictionary."""
 
     @mcp.tool(
         name=f"{namespace_prefix}get_database_overview",
-        annotations=ToolAnnotations(
-            title="Get Database Overview",
-            readOnlyHint=True,
-            destructiveHint=False,
-            idempotentHint=True,
-            openWorldHint=False
-        )
+        annotations=ToolAnnotations(title="Get Database Overview", readOnlyHint=True,
+                                    destructiveHint=False, idempotentHint=True, openWorldHint=False),
     )
-    def get_database_overview() -> ToolResult:
-        """Get an overview of all tables in the Clinical Data Warehouse with their descriptions.
-        Returns table names, descriptions, and whether they contain patient/encounter data.
-        Call this first to understand what data is available."""
-        schema = _get_schema_ref()
+    def get_database_overview(
+        offset: int = Field(0, ge=0, description="Table offset; use next_offset for the next page."),
+        limit: int = Field(20, ge=1, le=50, description="Tables per page (maximum 50)."),
+        detail: bool = Field(False, description="Include complete descriptions; default previews at most 180 characters each."),
+    ) -> ToolResult:
+        """List a page of tables from the bundled dictionary, sorted by name.
+
+        Returns patient/encounter key metadata, column counts and descriptions.
+        This is not live schema validation. Follow next_offset until has_more=false
+        for all tables; detail=true removes description truncation. Use describe_table
+        for columns and search_schema for a targeted lookup.
+        """
         overview = []
-        for name, info in schema.items():
-            entry = {
+        for name, info in sorted(_get_schema_ref().items()):
+            overview.append({
                 "table_name": name,
-                "description": info.get("description", ""),
+                **_description(info.get("description"), detail),
                 "has_patient_data": info.get("has_patient_data", False),
                 "has_encounter_data": info.get("has_encounter_data", False),
                 "column_count": len(info.get("columns", [])),
-            }
-            pk = info.get("patient_key_column")
-            if pk:
-                entry["patient_key_column"] = pk
-            ek = info.get("encounter_key_column")
-            if ek:
-                entry["encounter_key_column"] = ek
-            overview.append(entry)
-        return ToolResult(content=[TextContent(type="text", text=json.dumps(overview, indent=2))])
+                "patient_key_column": info.get("patient_key_column"),
+                "encounter_key_column": info.get("encounter_key_column"),
+            })
+        return _page(overview, offset, limit, detail)
 
-    # Data quality notes for specific tables, surfaced in describe_table
     TABLE_NOTES = {
         "PatientDim": (
-            "SCD Type 2 table: multiple historical rows per patient. "
-            "Use IsCurrent=1 for current record, or ORDER BY StartDate DESC for most recent. "
-            "Some patients may not have IsCurrent=1; always fall back to MAX(StartDate)."
+            "SCD Type 2: use PatientDurableKey for stable identity and IsCurrent=1 "
+            "when requesting current demographics. PatientKey identifies a historical version. "
+            "If no current row exists, report that absence; a latest historical row is not "
+            "evidence of a current record. Inspect history explicitly when required."
         ),
         "LabComponentResultFact": (
-            "NumericValue is de-identified (contains 'DEID'). Use the Value column (string) "
-            "for actual numeric results. ReferenceValues is a combined string (e.g., 'Low: 10 High: 61'). "
-            "Use Flag and Abnormal columns for abnormality indicators. "
-            "There is no TextValue, ReferenceLow, ReferenceHigh, or AbnormalFlag column."
+            "Deployment guidance: prefer the Value string for results; NumericValue may be "
+            "de-identified. ReferenceValues is a combined string. Use Flag/Abnormal for "
+            "abnormality indicators; verify actual view columns before constructing queries."
         ),
-        "LabComponentDim": (
-            "The LOINC code column is named LoincCode (not Loinc)."
-        ),
+        "LabComponentDim": "The bundled dictionary names the LOINC column LoincCode, not Loinc.",
         "MedicationDim": (
-            "Pre-Epic legacy records show *Unspecified for GenericName, TherapeuticClass, "
-            "Strength, Form. Only Name (e.g., 'COPAXONE') is reliable for those records."
+            "Legacy records may show *Unspecified in GenericName, TherapeuticClass, Strength "
+            "or Form. Inspect values before relying on these fields for cohort criteria."
         ),
     }
 
     @mcp.tool(
         name=f"{namespace_prefix}describe_table",
-        annotations=ToolAnnotations(
-            title="Describe Table",
-            readOnlyHint=True,
-            destructiveHint=False,
-            idempotentHint=True,
-            openWorldHint=False
-        )
+        annotations=ToolAnnotations(title="Describe Table", readOnlyHint=True,
+                                    destructiveHint=False, idempotentHint=True, openWorldHint=False),
     )
-    def describe_table(table_name: str) -> ToolResult:
-        """Get detailed column information for a specific table including column names,
-        data types, descriptions, and foreign key relationships (lookup tables).
-        Columns marked queryable=false may not exist in the SQL view — use the
-        corresponding base column instead (e.g., DateKey instead of DateKeyValue)."""
+    def describe_table(
+        table_name: str,
+        offset: int = Field(0, ge=0, description="Column offset in dictionary order."),
+        limit: int = Field(25, ge=1, le=100, description="Columns per page (maximum 100)."),
+        detail: bool = Field(False, description="Include every dictionary column field and full descriptions."),
+    ) -> ToolResult:
+        """Describe one page of columns from the bundled dictionary, not live DB truth.
+
+        The default is a compact column/type/lookup preview; detail=true returns full
+        dictionary fields. Follow next_offset to read all columns. queryable=false
+        flags dictionary-only fields that may be absent from the SQL view; inspect
+        the corresponding base field instead. Table names are case-insensitive.
+        """
         schema = _get_schema_ref()
-        if table_name not in schema:
-            matches = [k for k in schema if k.lower() == table_name.lower()]
-            if matches:
-                table_name = matches[0]
-            else:
-                raise ToolError(f"Table '{table_name}' not found. Use get_database_overview to see available tables.")
+        matches = [name for name in schema if name.lower() == table_name.strip().lower()]
+        if not matches:
+            raise ToolError(f"Table '{table_name}' not found in the bundled dictionary. Use search_schema or get_database_overview.")
+        table_name = matches[0]
         info = schema[table_name]
-        result = {
-            "table_name": table_name,
-            "description": info.get("description", ""),
-            "has_patient_data": info.get("has_patient_data", False),
-            "patient_key_column": info.get("patient_key_column"),
-            "encounter_key_column": info.get("encounter_key_column"),
-            "columns": info.get("columns", []),
-        }
-        # Add data quality notes if available
-        if table_name in TABLE_NOTES:
-            result["data_notes"] = TABLE_NOTES[table_name]
-        return ToolResult(content=[TextContent(type="text", text=json.dumps(result, indent=2))])
+        columns = []
+        for column in info.get("columns", []):
+            entry = dict(column) if detail else {
+                key: value for key, value in column.items()
+                if key in ("name", "data_type", "queryable", "note", "lookup_table", "lookup_column", "lookup_type")
+            }
+            entry.update(_description(column.get("description"), detail))
+            columns.append(entry)
+        return _page(columns, offset, limit, detail,
+                     table_name=table_name,
+                     **_description(info.get("description"), detail),
+                     has_patient_data=info.get("has_patient_data", False),
+                     patient_key_column=info.get("patient_key_column"),
+                     encounter_key_column=info.get("encounter_key_column"),
+                     data_notes=TABLE_NOTES.get(table_name))
 
     @mcp.tool(
         name=f"{namespace_prefix}search_schema",
-        annotations=ToolAnnotations(
-            title="Search Schema",
-            readOnlyHint=True,
-            destructiveHint=False,
-            idempotentHint=True,
-            openWorldHint=False
-        )
+        annotations=ToolAnnotations(title="Search Schema", readOnlyHint=True,
+                                    destructiveHint=False, idempotentHint=True, openWorldHint=False),
     )
-    def search_schema(keyword: str) -> ToolResult:
-        """Search table and column names and descriptions for a keyword.
-        Useful for finding which tables contain data about a specific concept
-        (e.g., 'allergy', 'medication', 'diagnosis', 'lab')."""
-        schema = _get_schema_ref()
-        keyword_lower = keyword.lower()
+    def search_schema(
+        keyword: str = Field(..., min_length=1, description="Nonempty literal term to match in table/column names or descriptions."),
+        offset: int = Field(0, ge=0, description="Match offset; use next_offset for the next page."),
+        limit: int = Field(20, ge=1, le=100, description="Matches per page (maximum 100)."),
+        detail: bool = Field(False, description="Include complete descriptions and column dictionary fields."),
+    ) -> ToolResult:
+        """Search the bundled dictionary, returning a bounded page of matches.
+
+        Each result has scope=table or scope=column and its table_name; column
+        matches also include column_name and data_type. Match order is table name,
+        then table match followed by columns in dictionary order. Follow next_offset
+        for every match; detail=true returns full descriptions. No matches returns
+        total=0. This lookup does not query or verify the live database.
+        """
+        keyword_lower = keyword.strip().lower()
+        if not keyword_lower:
+            raise ToolError("Provide a nonempty keyword; use get_database_overview to browse all tables.")
         results = []
-
-        for table_name, info in schema.items():
-            table_match = keyword_lower in table_name.lower() or keyword_lower in (info.get("description") or "").lower()
-            matching_columns = []
-            for col in info.get("columns", []):
-                col_name = col.get("name", "")
-                col_desc = col.get("description", "") or ""
-                if keyword_lower in col_name.lower() or keyword_lower in col_desc.lower():
-                    col_entry = {
-                        "column_name": col_name,
-                        "description": col_desc,
-                        "data_type": col.get("data_type"),
+        for table_name, info in sorted(_get_schema_ref().items()):
+            if keyword_lower in table_name.lower() or keyword_lower in (info.get("description") or "").lower():
+                results.append({"scope": "table", "table_name": table_name,
+                                **_description(info.get("description"), detail)})
+            for column in info.get("columns", []):
+                if (keyword_lower in column.get("name", "").lower() or
+                        keyword_lower in (column.get("description") or "").lower()):
+                    entry = dict(column) if detail else {
+                        key: value for key, value in column.items()
+                        if key in ("data_type", "queryable", "note", "lookup_table", "lookup_column", "lookup_type")
                     }
-                    if col.get("queryable") is False:
-                        col_entry["queryable"] = False
-                        col_entry["note"] = col.get("note", "")
-                    matching_columns.append(col_entry)
-
-            if table_match or matching_columns:
-                entry = {
-                    "table_name": table_name,
-                    "table_description": info.get("description", ""),
-                }
-                if matching_columns:
-                    entry["matching_columns"] = matching_columns
-                results.append(entry)
-
-        if not results:
-            return ToolResult(content=[TextContent(type="text", text=f"No tables or columns matching '{keyword}' found.")])
-
-        return ToolResult(content=[TextContent(type="text", text=json.dumps(results, indent=2))])
+                    entry.update(scope="column", table_name=table_name,
+                                 column_name=column.get("name", ""),
+                                 **_description(column.get("description"), detail))
+                    results.append(entry)
+        return _page(results, offset, limit, detail, keyword=keyword.strip())
