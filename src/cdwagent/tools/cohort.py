@@ -32,7 +32,8 @@ import logging
 from pydantic import Field
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
-from fastmcp.tools.tool import ToolResult, TextContent
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
 from mcp.types import ToolAnnotations
 
 from cdwagent.config import ClinicalDBConfig
@@ -219,7 +220,7 @@ def register_cohort_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: 
         # is ~3x faster with ≲2% error — opt-in for speed on large cohorts;
         # exact COUNT(DISTINCT) is the default for research integrity.
         count_expr = ("APPROX_COUNT_DISTINCT(PatientDurableKey)" if approximate
-                      else "COUNT(DISTINCT PatientDurableKey)")
+                      else "COUNT_BIG(DISTINCT PatientDurableKey)")
         count_sql = f"SELECT {count_expr} FROM {schema}.{r['fact']} WHERE {fact_filter}"
         _, crows = run_rows(clinical_config, count_sql)
         patient_count = int(crows[0][0]) if crows and crows[0][0] is not None else 0

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "cdwagent"
-version = "0.5.1"
+version = "0.6.0"
 description = "MCP server for a de-identified Epic Caboodle Clinical Data Warehouse (SQL Server, read-only). BioRouter extension, sibling of UCSFOMOPAgent."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -17,10 +17,14 @@ keywords = [
     "clinical-informatics", "epic", "caboodle", "cdw"
 ]
 dependencies = [
-    "fastmcp>=2.11.2",
+    "keyring>=25,<26",
+    "fastmcp>=4.0,<5.0",
     "pydantic>=2.11.7",
     "pymssql>=2.3.7",
     "openpyxl>=3.1.0",
+    "filelock>=3.20,<4",
+    "sqlglot>=28,<29",
+    "cryptography>=50,<51",
 ]
 requires-python = ">=3.11"
 

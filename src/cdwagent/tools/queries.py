@@ -1,11 +1,13 @@
 """SQL execution and canned clinical query tools"""
 
 import logging
+from typing import Literal
 
 from pydantic import Field
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
-from fastmcp.tools.tool import ToolResult, TextContent
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
 from mcp.types import ToolAnnotations
 
 from cdwagent.config import ClinicalDBConfig
@@ -52,7 +54,7 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
                 "like PatientDurableKey and will fail with 'Invalid column name' errors."
             ),
         ),
-        row_limit: int = Field(DEFAULT_ROW_LIMIT, description="Maximum rows to return (default 1000)")
+        row_limit: int = Field(DEFAULT_ROW_LIMIT, ge=1, le=1000, description="Maximum rows to return (default 1000)")
     ) -> ToolResult:
         """Execute a READ-ONLY SQL query on the Clinical Data Warehouse.
 
@@ -62,7 +64,8 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         Correct: SELECT COUNT(DISTINCT PatientDurableKey) FROM deid_uf.PatientDim
         Wrong:   SELECT COUNT(DISTINCT PatientDurableKey) FROM PatientDim
 
-        Only SELECT, WITH, DECLARE statements are allowed. Results as CSV.
+        Only read-only SELECT or WITH queries are allowed. Results are bounded CSV previews.
+        Use submit_query_job for complete exports or expensive queries.
 
         For table lists, column names, date-column mapping per fact table, and performance
         patterns, see the server instructions (loaded at session start). For specific table
@@ -81,7 +84,8 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         )
     )
     def get_patient_demographics(
-        patient_id: str = Field(..., description="PatientDurableKey (preferred, stable) or PatientKey (SCD surrogate). Use PatientDurableKey when available.")
+        patient_id: str = Field(..., description="Patient identifier. Defaults to stable PatientDurableKey; explicitly set id_type for a surrogate PatientKey."),
+        id_type: Literal["PatientDurableKey", "PatientKey"] = "PatientDurableKey"
     ) -> ToolResult:
         """Retrieve demographic information for a patient from PatientDim.
         Returns the most recent record (IsCurrent=1).
@@ -91,14 +95,13 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
 
         Key columns: PatientKey, PatientDurableKey, Sex, BirthDate, DeathDate,
         FirstRace, Ethnicity, PreferredLanguage, MaritalStatus, SmokingStatus, IsCurrent, Status."""
-        # Auto-detect: if it looks like a PatientDurableKey (appears in both PatientKey and PatientDurableKey),
-        # query by PatientDurableKey for reliable matching
         pid = sql_escape_literal(patient_id)
-        # PatientDim is a (small) dimension, so accepting either key here is cheap.
+        key_filter = (f"PatientDurableKey = '{pid}'" if id_type == "PatientDurableKey" else
+                      f"PatientDurableKey IN (SELECT PatientDurableKey FROM {schema}.PatientDim "
+                      f"WHERE PatientKey = '{pid}')")
         sql = (
             f"SELECT TOP 1 * FROM {schema}.PatientDim "
-            f"WHERE (PatientDurableKey = '{pid}' OR PatientKey = '{pid}') "
-            f"ORDER BY CASE WHEN IsCurrent = 1 THEN 0 ELSE 1 END, StartDate DESC"
+            f"WHERE IsCurrent = 1 AND {key_filter} ORDER BY StartDate DESC"
         )
         result = _execute_readonly_query(clinical_config, sql)
         return ToolResult(content=[TextContent(type="text", text=result)])
@@ -164,8 +167,8 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         )
     )
     def get_encounters(
-        patient_id: str = Field(..., description="PatientDurableKey (preferred) or PatientKey"),
-        row_limit: int = Field(DEFAULT_ROW_LIMIT, description="Maximum rows to return")
+        patient_id: str = Field(..., description="PatientDurableKey (stable identifier; resolve surrogate PatientKey with get_patient_demographics first)"),
+        row_limit: int = Field(DEFAULT_ROW_LIMIT, ge=1, le=1000, description="Maximum rows to return")
     ) -> ToolResult:
         """Retrieve encounter history for a patient from EncounterFact.
 
@@ -175,7 +178,7 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         Key columns: EncounterKey, PatientKey, PatientDurableKey, DateKey, Type (not EncounterType),
         DepartmentName, DepartmentSpecialty, PatientClass, VisitType."""
         pid = sql_escape_literal(patient_id)
-        sql = (f"SELECT TOP {int(row_limit)} * FROM {schema}.EncounterFact "
+        sql = (f"SELECT TOP {int(row_limit) + 1} * FROM {schema}.EncounterFact "
                f"WHERE PatientDurableKey = '{pid}' "
                f"ORDER BY DateKey DESC")
         result = _execute_readonly_query(clinical_config, sql, row_limit)
@@ -192,8 +195,8 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         )
     )
     def get_medications(
-        patient_id: str = Field(..., description="PatientDurableKey (preferred) or PatientKey"),
-        row_limit: int = Field(DEFAULT_ROW_LIMIT, description="Maximum rows to return")
+        patient_id: str = Field(..., description="PatientDurableKey (stable identifier; resolve surrogate PatientKey with get_patient_demographics first)"),
+        row_limit: int = Field(DEFAULT_ROW_LIMIT, ge=1, le=1000, description="Maximum rows to return")
     ) -> ToolResult:
         """Retrieve medication order records for a patient from MedicationOrderFact.
 
@@ -202,7 +205,7 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         Treatment duration: use StartDateKey/EndDateKey span, not just OrderedDateKey.
         Filter invalid dates: WHERE DateKey > 19000101."""
         pid = sql_escape_literal(patient_id)
-        sql = (f"SELECT TOP {int(row_limit)} * FROM {schema}.MedicationOrderFact "
+        sql = (f"SELECT TOP {int(row_limit) + 1} * FROM {schema}.MedicationOrderFact "
                f"WHERE PatientDurableKey = '{pid}' "
                f"ORDER BY OrderedDateKey DESC")
         result = _execute_readonly_query(clinical_config, sql, row_limit)
@@ -219,15 +222,15 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         )
     )
     def get_diagnoses(
-        patient_id: str = Field(..., description="PatientDurableKey (preferred) or PatientKey"),
-        row_limit: int = Field(DEFAULT_ROW_LIMIT, description="Maximum rows to return")
+        patient_id: str = Field(..., description="PatientDurableKey (stable identifier; resolve surrogate PatientKey with get_patient_demographics first)"),
+        row_limit: int = Field(DEFAULT_ROW_LIMIT, ge=1, le=1000, description="Maximum rows to return")
     ) -> ToolResult:
         """Retrieve diagnosis history for a patient from DiagnosisEventFact.
 
         IMPORTANT: Pass a PatientDurableKey (stable). PatientKey is not matched here (OR across
         both defeats the index on this large fact table); resolve upstream if you only have one."""
         pid = sql_escape_literal(patient_id)
-        sql = (f"SELECT TOP {int(row_limit)} * FROM {schema}.DiagnosisEventFact "
+        sql = (f"SELECT TOP {int(row_limit) + 1} * FROM {schema}.DiagnosisEventFact "
                f"WHERE PatientDurableKey = '{pid}' "
                f"ORDER BY StartDateKey DESC")
         result = _execute_readonly_query(clinical_config, sql, row_limit)
@@ -244,8 +247,8 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         )
     )
     def get_labs(
-        patient_id: str = Field(..., description="PatientDurableKey (preferred) or PatientKey"),
-        row_limit: int = Field(DEFAULT_ROW_LIMIT, description="Maximum rows to return")
+        patient_id: str = Field(..., description="PatientDurableKey (stable identifier; resolve surrogate PatientKey with get_patient_demographics first)"),
+        row_limit: int = Field(DEFAULT_ROW_LIMIT, ge=1, le=1000, description="Maximum rows to return")
     ) -> ToolResult:
         """Retrieve lab component results for a patient from LabComponentResultFact.
 
@@ -254,7 +257,7 @@ def register_query_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         Key columns: Value (string result — use this, not NumericValue which is DEID'd),
         ReferenceValues (combined string), Flag, Abnormal, ResultDateKey (YYYYMMDD int)."""
         pid = sql_escape_literal(patient_id)
-        sql = (f"SELECT TOP {int(row_limit)} * FROM {schema}.LabComponentResultFact "
+        sql = (f"SELECT TOP {int(row_limit) + 1} * FROM {schema}.LabComponentResultFact "
                f"WHERE PatientDurableKey = '{pid}' "
                f"ORDER BY ResultDateKey DESC")
         result = _execute_readonly_query(clinical_config, sql, row_limit)

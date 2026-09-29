@@ -22,7 +22,8 @@ from typing import Optional
 from pydantic import Field
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
-from fastmcp.tools.tool import ToolResult, TextContent
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
 from mcp.types import ToolAnnotations
 
 from cdwagent.config import ClinicalDBConfig
@@ -54,7 +55,7 @@ def _validate_cohort(keys: list[str]) -> list[str]:
     if len(keys) > _MAX_COHORT_SIZE:
         raise ToolError(
             f"Cohort too large ({len(keys)} > {_MAX_COHORT_SIZE}). "
-            f"For large cohorts, use search_note_concepts which scales via NLP indexing."
+            f"For large cohorts, use submit_query_job with a PatientDurableKey subquery and monitor query_job_status."
         )
     bad = [k for k in keys if not _PATIENT_KEY_RE.match(str(k))]
     if bad:
@@ -130,13 +131,13 @@ def register_notes_tools(
             description="Exclude historical mentions ('prior X'). Default False — historical mentions are usually clinically relevant for retrospective research.",
         ),
         min_confidence: float = Field(
-            0.5, description="Minimum NLP extraction confidence (0.0–1.0). Default 0.5."
+            0.5, ge=0, le=1, description="Minimum NLP extraction confidence (0.0–1.0). Default 0.5."
         ),
         include_snippet: bool = Field(
             True,
             description="If True, include a ±100 char snippet around each match. Adds a join to note_text.",
         ),
-        row_limit: int = Field(100, description="Maximum rows to return (default 100)."),
+        row_limit: int = Field(100, ge=1, le=1000, description="Maximum rows to return (default 100)."),
     ) -> ToolResult:
         """Search NLP-extracted concepts (cTAKES) in clinical notes.
 
@@ -302,7 +303,7 @@ def register_notes_tools(
         exclude_negated: bool = Field(
             True, description="Exclude concepts marked as negated by NLP. Default True."
         ),
-        row_limit: int = Field(100, description="Maximum rows (default 100)."),
+        row_limit: int = Field(100, ge=1, le=1000, description="Maximum rows (default 100)."),
     ) -> ToolResult:
         """Search Social Determinants of Health (SDOH) concepts in clinical notes.
 
@@ -411,7 +412,7 @@ def register_notes_tools(
                 "family-history filtering."
             ),
         ),
-        row_limit: int = Field(50, description="Max notes to return (default 50)."),
+        row_limit: int = Field(50, ge=1, le=1000, description="Max notes to return (default 50)."),
     ) -> ToolResult:
         """Retrieve clinical notes scoped to a defined cohort of patients.
 

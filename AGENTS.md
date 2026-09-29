@@ -40,7 +40,12 @@ cdwagent
 uv run python scripts/parse_data_dictionary.py /path/to/deid_uf_data_dictionary.xlsx
 ```
 
-No test suite, linter, or CI currently configured.
+Run `uv run python -m unittest discover -s tests -v` for credential-free tests.
+CI tests on Linux and macOS, builds the wheel and checks deterministic BRXT output.
+Run `uv build --wheel` and `uv run python scripts/build_brxt.py` before release;
+commit the rebuilt `extensions/cdwagent.brxt` and `extensions/SHA256SUMS`.
+Use `uv run python scripts/version.py X.Y.Z`, then `uv lock`, to update versions.
+Live database tests require authorized credentials and UCSF connectivity.
 
 ## Architecture
 
@@ -69,11 +74,12 @@ src/cdwagent/
 ### Entry Points
 
 1. **pip/uvx package** (`src/cdwagent/`): `cli.py` reads env vars → `server.main()` → `create_cdw_server(config)` → `mcp.run()`
-2. **BioRouter extension**: registered as a `type: stdio` entry in `~/.config/biorouter/config.yaml`, invoked via `uvx --from git+... cdwagent`. See `docs/BIOROUTER.md`.
+2. **BioRouter extension**: install `extensions/cdwagent.brxt`; BioRouter creates its environment and configures the declared credentials. See `docs/BIOROUTER.md`.
+3. **Job CLI**: `cdwagent submit/status/watch/list/cancel/purge` uses the same durable job runtime as the three MCP job tools. `cdwagent auth` configures a separate standalone OS-keyring profile.
 
 ### Schema Reference
 
-The data dictionary (139 tables, ~5000 columns) is parsed into `src/cdwagent/data/schema_reference.json` by `scripts/parse_data_dictionary.py`. The JSON lives **inside the Python package** so it ships with the wheel and is found at runtime under any install layout (editable, pip, uvx). Schema tools read from it without needing a DB connection.
+The data dictionary (139 tables, ~5000 columns) is parsed into `src/cdwagent/data/schema_reference.json` by `scripts/parse_data_dictionary.py`. The JSON lives **inside the Python package** so it ships with the wheel and is found at runtime under any install layout (editable, pip, uvx). Schema tools read from it without needing a DB connection. It is bundled reference metadata, not a live catalog guarantee. Their JSON envelopes contain `results`, `total`, `has_more` and `next_offset`; follow offsets to retrieve all tables/columns/matches. `detail=true` returns complete descriptions and column fields. Default pages are 20 tables, 25 columns or 20 search matches; blank searches are rejected.
 
 **The source xlsx is NOT bundled in this repository** (local-governance artifact). The parsed JSON is committed, so the runtime has everything it needs. If you need to regenerate the JSON from an updated dictionary, obtain the xlsx through your institution's CDW governance channel and run:
 
@@ -83,9 +89,9 @@ uv run python scripts/parse_data_dictionary.py /path/to/deid_uf_data_dictionary.
 
 ### Security Model (Critical — identical to MedCP)
 
-- **SQL validation**: `ClinicalQueryValidator.is_read_only_clinical_query()` enforces SELECT/WITH/DECLARE-only via regex. Blocks semicolons.
-- **Write blocking**: `_is_write_query()` blocks MERGE, CREATE, INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, EXEC, etc.
-- **Credentials**: BioRouter stores via `envs` inline in `config.yaml` or `env_keys` (OS keyring). Never hardcoded, never logged.
+- **SQL validation**: `ClinicalQueryValidator.is_read_only_clinical_query()` delegates to the shared `jobs.validate_query` read-only SELECT/WITH policy. It is a supplemental guard; database accounts must have read-only privileges.
+- **Write blocking**: the shared query guard rejects write operations, procedure calls and external data sources. Test SQL dialect quoting when changing it.
+- **Credentials**: configure through BioRouter's extension UI/CLI. Standalone jobs use their separate OS-keyring profile (`cdwagent auth`) or injected environment variables. Never hardcode credentials or pass them in command arguments. SQL logging is opt-in via `CDW_SQL_LOG` and may contain sensitive query literals.
 
 ### Configuration
 
@@ -96,7 +102,7 @@ All config via environment variables (see `.env.example`):
 - `CDW_SCHEMA` (database schema for table qualification, default "deid_uf")
 - `CDW_LOG_LEVEL`
 
-### 21 MCP Tools (namespace-prefixed with `CDW-`)
+### 25 MCP Tools (namespace-prefixed with `CDW-`)
 
 | Module | Tools |
 |---|---|
@@ -106,6 +112,8 @@ All config via environment variables (see `.env.example`):
 | export.py | `export_query_to_csv` |
 | concepts.py | `search_diagnoses_by_code`, `search_medications_by_code`, `search_labs_by_code`, `search_procedures_by_code` |
 | stats.py | `summarize_table`, `cohort_summary` |
+| cohort.py | `build_cohort` |
+| jobs.py | `submit_query_job`, `query_job_status`, `cancel_query_job` |
 
 `search_note_concepts` and `search_note_sdoh` were added in v0.4.0 to expose the
 NLP-extracted concept layer (`note_concepts`, `note_concepts_sdoh`, populated by
@@ -173,7 +181,7 @@ The `crossmap_patient` tool resolves an OMOP `person_id` to a CDW `PatientDurabl
 BioRouter does NOT use a classifier to pick agents; it flattens all enabled extensions' tools into one list and lets the LLM choose. Consequences for this repo:
 
 - Tool names and descriptions ARE the routing signal — keep the `CDW-` prefix to disambiguate from OMOPAgent's `query_ucsf_omop` etc.
-- `timeout: 600` is recommended in the BioRouter config entry — some cohort queries approach the default 300s.
+- Use `submit_query_job` for expensive queries/exports and poll `query_job_status` at its recommended interval. Increasing an MCP timeout alone does not make an export durable.
 - Publish tagged releases so BioRouter's `extension_malware_check` pins a stable git ref.
 
 ### Context strategy (LLM dispatch optimization)

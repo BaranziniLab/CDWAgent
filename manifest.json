@@ -2,10 +2,10 @@
   "name": "cdwagent",
   "display_name": "CDWAgent",
   "description": "Read-only MCP access to UCSF Epic Caboodle Clinical Data Warehouse.",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "entry_point": "cdwagent",
   "repository": "https://github.com/BaranziniLab/CDWAgent",
-  "tools_count": 22,
+  "tools_count": 25,
   "env_vars": [
     {
       "key": "CLINICAL_RECORDS_USERNAME",
@@ -24,7 +24,7 @@
     {
       "key": "CLINICAL_RECORDS_SERVER",
       "required": false,
-      "auto_propagate": true,
+      "auto_propagate": false,
       "default": "QCDIDDWDB001.ucsfmedicalcenter.org",
       "description": "SQL Server hostname",
       "secret": false
@@ -32,7 +32,7 @@
     {
       "key": "CLINICAL_RECORDS_DATABASE",
       "required": false,
-      "auto_propagate": true,
+      "auto_propagate": false,
       "default": "CDW_NEW",
       "description": "Database name",
       "secret": false
@@ -60,6 +60,12 @@
       "default": "INFO",
       "description": "Logging level",
       "secret": false
+    }
+  ],
+  "skills": [
+    {
+      "name": "cdwagent-query-jobs",
+      "description": "Plan and monitor read-only background database exports without MCP timeouts."
     }
   ]
 }

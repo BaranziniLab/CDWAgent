@@ -1,26 +1,81 @@
 # CDWAgent
 
+Current version: **0.6.0**. Small queries stay on MCP; long queries and full
+exports run as monitored local jobs without tying up an MCP request.
+
+## Install in BioRouter
+
+1. Download **[cdwagent.brxt](https://github.com/BaranziniLab/CDWAgent/releases/latest/download/cdwagent.brxt)**
+   from [Releases](https://github.com/BaranziniLab/CDWAgent/releases/latest).
+   The same current bundle is committed under [extensions/](extensions/).
+2. In BioRouter, open **Extensions → Add extension**, select the BRXT and install.
+   BioRouter creates the Python environment; `uv` and Python 3.11+ are required.
+3. Enter credentials in BioRouter's own configuration dialog, never in chat.
+4. Enable the extension in your chat. Verify a small query before a larger export.
+
+Terminal installation uses the same installer:
+
+```bash
+biorouter extension install ./extensions/cdwagent.brxt
+biorouter extension configure cdwagent
+```
+
+Configure `CLINICAL_RECORDS_USERNAME` and `CLINICAL_RECORDS_PASSWORD`. Host defaults to the UCSF SQL Server; database defaults to `CDW_NEW`. Optional `CLINICAL_RECORDS_SERVER` / `CLINICAL_RECORDS_DATABASE` overrides are declared in the manifest. UCSF network/VPN access and database read permission are required.
+
+The Desktop installer discovers bundled `skills/*/SKILL.md`. If using a BioRouter
+CLI version that does not copy bundled skills, the MCP server still provides the
+job-routing instructions; the skill folders can also be installed separately.
+
+## Compatibility notes
+
+- `get_patient_demographics(patient_id=...)` interprets the identifier as a stable
+  `PatientDurableKey`. Set `id_type="PatientKey"` explicitly to resolve a historical
+  surrogate key to the patient's current record. Other patient tools take the
+  durable key.
+- Interactive `row_limit` values must be 1–1,000. Generic and patient-detail query
+  previews disclose truncation; use query jobs for complete exports.
+- Schema tools return paginated JSON envelopes (`results`, `total`, `has_more`,
+  `next_offset`). Defaults are 20 tables, 25 columns or 20 search matches. Follow
+  `next_offset`; use `detail=true` for full dictionary descriptions and fields.
+  These tools read bundled metadata, not the live database catalog.
+- `export_query_to_csv` requires a new filename and publishes only a complete,
+  private file. It remains synchronous; prefer query jobs for long exports.
+
+## Long queries, CLI and progress
+
+Use `CDW-submit_query_job` for an export or a query that could exceed the
+interactive timeout. It returns a job ID immediately. Poll
+`CDW-query_job_status` at its recommended interval; use
+`CDW-cancel_query_job` to stop. Only `completed` means the file is complete.
+Status includes rows, bytes, elapsed time, phase and an advisory ETA when known.
+Set `mode="explain"` to obtain a plan without running the query.
+
+From a source checkout, or BioRouter's installed extension directory:
+
+```bash
+uv sync --locked
+# Standalone CLI only: configure its OS-keyring profile interactively once.
+# BioRouter MCP jobs already receive credentials and do not need this command.
+uv run cdwagent auth
+uv run cdwagent submit --query-file query.sql --format jsonl --timeout-seconds 3600
+uv run cdwagent watch JOB_ID
+```
+
+No-argument `uv run cdwagent` continues to start the MCP server. `status`, `watch`,
+`list`, `cancel` and `purge` need no database credentials. Results remain in the
+local private job directory and are not sent to chat. Database/server limits can
+still fail a query; jobs report those failures instead of silently truncating.
+
+See [architecture, storage, security and release details](docs/QUERY_JOBS.md).
+To rebuild the tracked bundle: `uv run python scripts/build_brxt.py`.
+
+
 An MCP (Model Context Protocol) server that exposes a de-identified **Epic Caboodle Clinical Data Warehouse** (SQL Server) to [**BioRouter**](https://github.com/BaranziniLab/BioRouter).
 
 Built for clinical researchers who need natural-language access to EHR data without writing SQL. Designed as a sibling of [UCSFOMOPAgent](https://github.com/BaranziniLab/UCSFOMOPAgent): CDWAgent targets the UF Epic Caboodle schema while OMOPAgent targets the OHDSI/OMOP common data model. Both can be enabled in the same BioRouter session — tool names are namespace-prefixed to prevent collision, and CDWAgent includes a `crossmap_patient` tool that resolves OMOP `person_id` values to CDW `PatientDurableKey`.
 
 Architecture is based on the [MedCP](https://github.com/BaranziniLab/MedCP) template by the UCSF Baranzini Lab, with a modular tool registry, expanded clinical tools, and no knowledge graph dependency.
 
-## BioRouter Extension
-
-**[Download cdwagent.brxt](https://github.com/BaranziniLab/CDWAgent/releases/latest/download/cdwagent.brxt)**
-
-Drag the `.brxt` file into BioRouter's **Extensions → Add extension** dialog. BioRouter will install the virtual environment automatically and prompt for required credentials.
-
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `CLINICAL_RECORDS_USERNAME` | ✅ | — | UCSF network username (e.g. `CAMPUS\youruser`) |
-| `CLINICAL_RECORDS_PASSWORD` | ✅ | — | UCSF network password |
-| `CLINICAL_RECORDS_SERVER` | optional | `QCDIDDWDB001.ucsfmedicalcenter.org` | SQL Server hostname |
-| `CLINICAL_RECORDS_DATABASE` | optional | `CDW_NEW` | Database name |
-| `CDW_NAMESPACE` | optional | `CDW` | Tool namespace prefix |
-| `CDW_SCHEMA` | optional | `deid_uf` | SQL schema name |
-| `CDW_LOG_LEVEL` | optional | `INFO` | Logging level |
 
 ## Authors
 
@@ -29,7 +84,7 @@ Drag the `.brxt` file into BioRouter's **Extensions → Add extension** dialog. 
 
 ## Features
 
-- 22 MCP tools organized into 7 domain modules
+- 25 MCP tools: 22 domain tools across 7 modules and 3 durable query-job tools
 - **One-call multimodal cohort building** (`build_cohort`) across 8 modalities:
   diagnosis, medication, procedure, lab, **imaging/radiology**, **immunization**,
   **allergy**, and **vitals/flowsheets** — resolves a term/code, builds the
@@ -40,7 +95,7 @@ Drag the `.brxt` file into BioRouter's **Extensions → Add extension** dialog. 
 - Schema discovery from a pre-parsed data dictionary (no DB connection needed)
 - Clinical notes search and retrieval (cTAKES concepts, SDOH, section headings, verbatim)
 - Cohort building with aggregate demographics (single-pass GROUPING SETS)
-- CSV export for large result sets
+- Monitored CSV/JSONL exports for large result sets
 - Configurable tool namespace and database schema
 
 ### v0.5.0 reliability/perf overhaul (see `CHANGES.md`)
@@ -70,7 +125,7 @@ These tools read from the bundled `schema_reference.json` and require no databas
 
 ### Clinical Queries (7)
 
-These tools execute SELECT-only SQL against the de-identified Epic Caboodle warehouse. Every executed statement is validated by `ClinicalQueryValidator` (read-only enforcement, no semicolon chaining, blocked write verbs) and appended to the SQL audit log at `$TMPDIR/cdwagent_sql.log`.
+These tools execute read-only SQL against the de-identified Epic Caboodle warehouse. User-supplied SQL passes the shared read-only guard; canned tools construct their own statements. SQL-text logging is disabled unless an operator explicitly sets `CDW_SQL_LOG` to a private file path. That log can contain query literals and patient identifiers; enable it only under the applicable data policy.
 
 | Tool | Description |
 |------|-------------|
@@ -78,8 +133,8 @@ These tools execute SELECT-only SQL against the de-identified Epic Caboodle ware
 | `get_patient_demographics` | Return the most recent demographic record for a `PatientDurableKey` from `PatientDim` (filtered by `IsCurrent = 1`). Sex, birth date, race, ethnicity, language, status. |
 | `get_encounters` | Encounter history from `EncounterFact` for one patient, ordered by `DateKey` descending. Includes department specialty, encounter type, and visit type. |
 | `get_medications` | Medication orders from `MedicationOrderFact` for one patient, with `OrderedDateKey`/`StartDateKey`/`EndDateKey` so the agent can reconstruct treatment duration. |
-| `get_diagnoses` | Diagnosis history from `DiagnosisEventFact` for one patient, ordered by `StartDateKey`. Joined to `DiagnosisDim` for human-readable names and to `DiagnosisTerminologyDim` for the originating code system. |
-| `get_labs` | Lab results from `LabComponentResultFact` for one patient. Returns the `Value` string field rather than `NumericValue` (de-identified and unreliable for analysis). |
+| `get_diagnoses` | Diagnosis history from `DiagnosisEventFact` for one patient, ordered by `StartDateKey`. Resolve its `DiagnosisKey` values against `DiagnosisDim` or `DiagnosisTerminologyDim` when names or terminology are needed. |
+| `get_labs` | Lab results from `LabComponentResultFact` for one patient. For analysis use the `Value` string field; `NumericValue` is de-identified and unreliable. |
 | `crossmap_patient` | Resolve an OMOP `person_id` to a CDW `PatientDurableKey` via `OMOP_DEID.dbo.person.person_source_value = CDW_NEW.deid_uf.PatientDim.PatientEpicId` with `IsCurrent = 1`. Returns demographics plus a `birth_date_match` boolean for sanity-checking the join. The bridge tool when a study starts on the OMOP side and needs CDW depth. |
 
 ### Clinical Notes (4)
@@ -114,14 +169,14 @@ These tools resolve human-language concept names or terminology codes into the s
 
 | Tool | Description |
 |------|-------------|
-| `export_query_to_csv` | Execute a read-only SQL query and write the rows to a CSV file at a caller-specified path. Validator and audit log apply identically to `query`. The target directory must exist. |
+| `export_query_to_csv` | Execute a read-only SQL query and write the rows to a CSV file at a caller-specified path. Validator and audit log apply identically to `query`. The target directory must exist and the filename must be unused. This synchronous compatibility tool is for quick exports; use `submit_query_job` for large or uncertain workloads. |
 
 ### Statistics (2)
 
 | Tool | Description |
 |------|-------------|
-| `summarize_table` | Per-table descriptive statistics: row count, per-column null rates, and sample value distributions for low-cardinality categorical columns. |
-| `cohort_summary` | Aggregate demographics (age statistics, sex, race, ethnicity) for a cohort defined by a SQL subquery returning `PatientDurableKey`. Used as the closing summary at the end of a cohort-building workflow. |
+| `summarize_table` | Estimated row count from catalog metadata when permitted, plus null rates over up to 100,000 first-available rows and 50 columns. The sample is not random; unavailable catalog counts remain unknown without a full-table count. |
+| `cohort_summary` | Distinct patient count and optional demographic breakdowns (sex, race, ethnicity) for a cohort defined by a SQL subquery returning `PatientDurableKey`. Used as the closing summary at the end of a cohort-building workflow. |
 
 ## Guided Prompts
 
@@ -161,8 +216,8 @@ git clone https://github.com/BaranziniLab/CDWAgent.git
 cd CDWAgent
 uv sync
 cp .env.example .env
-# Edit .env with your database connection details
-uv run cdwagent
+# Edit .env locally with your database connection details; do not commit it.
+uv run --env-file .env cdwagent
 ```
 
 ### Run as a module
@@ -191,31 +246,10 @@ The server and database default to the UCSF CDW deployment. Set the env vars onl
 
 CDWAgent is a standard stdio MCP server, so it registers as a BioRouter **Extension** exactly like UCSFOMOPAgent does — no BioRouter-specific code needed.
 
-Add this block to `~/.config/biorouter/config.yaml`:
-
-```yaml
-extensions:
-  cdwagent:
-    type: stdio
-    name: CDWAgent
-    description: UF Epic Caboodle de-identified Clinical Data Warehouse (SQL Server, read-only)
-    enabled: true
-    cmd: uvx
-    args: ["--from", "git+https://github.com/BaranziniLab/CDWAgent", "cdwagent"]
-    timeout: 600
-    envs:
-      CLINICAL_RECORDS_USERNAME: "your-username"
-      CLINICAL_RECORDS_PASSWORD: "your-password"
-      CDW_SCHEMA: "deid_uf"
-```
-
-Server and database are hard-coded to the UCSF CDW deployment; override with `CLINICAL_RECORDS_SERVER` / `CLINICAL_RECORDS_DATABASE` only if needed.
-
-Or via CLI:
-
-```bash
-biorouter session --with-extension "CLINICAL_RECORDS_USERNAME=... CLINICAL_RECORDS_PASSWORD=... uvx --from git+https://github.com/BaranziniLab/CDWAgent cdwagent"
-```
+Use the BRXT installation and configuration commands above. They prompt through
+BioRouter's trusted configuration interface, avoiding passwords in shell arguments
+or hand-written configuration examples. Select a released bundle rather than an
+unpinned Git checkout for reproducible installations.
 
 **Tip — pairing with OMOPAgent:** enable both extensions to translate between the two clinical data representations. Ask BioRouter *"for OMOP person_id 12345, pull lab trends from the CDW side"* and it will call `CDW-crossmap_patient` then `CDW-get_labs`. See [`docs/BIOROUTER.md`](docs/BIOROUTER.md) for operational details (timeouts, malware check, tool-name disambiguation).
 
@@ -233,7 +267,7 @@ This is the generic pattern for MCPs targeting non-standard schemas. Thin tool d
 
 ## Schema Reference
 
-Schema discovery tools (`get_database_overview`, `describe_table`, `search_schema`) read from a pre-parsed JSON at [`src/cdwagent/data/schema_reference.json`](src/cdwagent/data/schema_reference.json) (bundled inside the Python package so `uvx` installs work out of the box) — **no database connection is required** for schema exploration. The JSON contains only structural metadata: table names, column names, data types, and descriptions. No patient data, no institutional identifiers.
+Schema discovery tools (`get_database_overview`, `describe_table`, `search_schema`) return bounded pages with explicit pagination and description-truncation metadata. Search requires a nonblank keyword. They read from a pre-parsed JSON at [`src/cdwagent/data/schema_reference.json`](src/cdwagent/data/schema_reference.json) (bundled inside the Python package so `uvx` installs work out of the box) — **no database connection is required** for schema exploration. The JSON contains only structural metadata: table names, column names, data types, and descriptions. No patient data, no institutional identifiers.
 
 **The source Epic Caboodle data dictionary (`.xlsx`) is intentionally NOT bundled with this repository.** It is a local governance artifact of each institution. The committed JSON is a derived representation — everything CDWAgent needs at runtime — but the original xlsx stays under institutional control.
 
@@ -267,18 +301,19 @@ src/cdwagent/
 
 ### Read-Only Enforcement
 
-All SQL queries are validated before execution by `ClinicalQueryValidator`:
-
-- Only `SELECT`, `WITH`, and `DECLARE` statements are allowed
-- Write operations (`INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `TRUNCATE`, `EXEC`, `MERGE`, `CREATE`) are blocked
-- Semicolons are rejected to prevent statement chaining
-- Queries are validated after stripping SQL comments
+User-supplied SQL uses the shared read-only policy through `ClinicalQueryValidator`
+or the job runtime. It accepts read-only `SELECT` / `WITH` queries and rejects
+writes, procedure calls and external data sources. Canned tools construct their
+own read-only queries. This conservative guard supplements database authorization;
+use database accounts restricted to read access. See
+[query-job boundaries](docs/QUERY_JOBS.md#read-only-and-failure-boundaries).
 
 ### Credential Handling
 
-- Database credentials are passed via environment variables, never hardcoded
-- BioRouter stores credentials via `envs` (inline) or `env_keys` (OS keyring) in its config
-- No credentials are logged or included in tool responses
+- Configure BioRouter credentials through its extension UI or `biorouter extension configure cdwagent`.
+- Standalone CLI jobs use a separate OS-keyring profile configured with `uv run cdwagent auth`; secret-manager environment injection is also supported.
+- Never place passwords in command arguments, chat, tracked files or example defaults.
+- Credentials are not returned by tools or persisted in job records. SQL-text audit logging is optional and can expose query literals.
 
 ## Disclaimer
 

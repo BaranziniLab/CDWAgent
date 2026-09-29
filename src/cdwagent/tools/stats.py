@@ -16,7 +16,8 @@ import logging
 from pydantic import Field
 from fastmcp.exceptions import ToolError
 from fastmcp.server import FastMCP
-from fastmcp.tools.tool import ToolResult, TextContent
+from fastmcp.tools import ToolResult
+from mcp.types import TextContent
 from mcp.types import ToolAnnotations
 
 from cdwagent.config import ClinicalDBConfig
@@ -46,12 +47,12 @@ def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
     def summarize_table(
         table_name: str = Field(..., description="Table name to summarize (unqualified, e.g. 'EncounterFact')")
     ) -> ToolResult:
-        """Get summary statistics for a table: exact row count plus per-column
+        """Get summary statistics for a table: estimated row count plus per-column
         null rates (estimated from a bounded sample for speed).
 
         Fast even on very large fact tables: the row count comes from catalog
         statistics (no scan) and null rates from a single capped scan."""
-        if not table_name.replace("_", "").replace(".", "").isalnum():
+        if not table_name.replace("_", "").isalnum():
             raise ToolError("Invalid table name")
 
         conn = get_connection(clinical_config)
@@ -59,7 +60,7 @@ def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
             cursor = conn.cursor()
             qualified_table = f"[{schema}].[{table_name}]"
 
-            # --- exact row count, no scan (P3) ---
+            # --- estimated row count, no scan (P3) ---
             try:
                 cursor.execute(
                     "SELECT SUM(ps.row_count) FROM sys.dm_db_partition_stats ps "
@@ -72,10 +73,6 @@ def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
                 row_count = int(row[0]) if row and row[0] is not None else None
             except Exception:
                 row_count = None
-            if row_count is None:  # fallback if catalog view is unavailable
-                cursor.execute(f"SELECT COUNT(*) FROM {qualified_table}")
-                row_count = cursor.fetchone()[0]
-
             # --- column list ---
             cursor.execute(
                 "SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
@@ -91,7 +88,7 @@ def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
 
             # --- all null counts in ONE bounded pass (P3) ---
             null_exprs = ", ".join(
-                f"SUM(CASE WHEN [{c[0]}] IS NULL THEN 1 ELSE 0 END) AS [{c[0]}]"
+                f"SUM(CASE WHEN [{c[0].replace(chr(93), chr(93)*2)}] IS NULL THEN 1 ELSE 0 END)"
                 for c in columns
             )
             cursor.execute(
@@ -105,6 +102,10 @@ def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
             summary = {
                 "table_name": f"{schema}.{table_name}",
                 "row_count": row_count,
+                "row_count_is_estimate": True,
+                "row_count_source": "sys.dm_db_partition_stats" if row_count is not None else "unavailable",
+                "sampling_method": "First available rows, not a random or representative sample",
+                "columns_limit": 50,
                 "null_rate_sampled_rows": sampled,
                 "columns": [],
             }
@@ -160,15 +161,10 @@ def register_stats_tools(mcp: FastMCP, namespace_prefix: str, clinical_config: C
         try:
             cursor = conn.cursor()
 
-            # Detect whether the subquery exposes PatientDurableKey (preferred) or PatientKey.
-            try:
-                cursor.execute(f"SELECT COUNT(DISTINCT PatientDurableKey) FROM ({patient_key_query}) sub")
-                count = cursor.fetchone()[0]
-                id_column = "PatientDurableKey"
-            except Exception:
-                cursor.execute(f"SELECT COUNT(DISTINCT PatientKey) FROM ({patient_key_query}) sub")
-                count = cursor.fetchone()[0]
-                id_column = "PatientKey"
+            # A surrogate-key fallback can silently select a different patient population.
+            cursor.execute(f"SELECT COUNT_BIG(DISTINCT PatientDurableKey) FROM ({patient_key_query}) sub")
+            count = cursor.fetchone()[0]
+            id_column = "PatientDurableKey"
 
             result = {"patient_key_query": patient_key_query, "id_column": id_column, "patient_count": count}
 

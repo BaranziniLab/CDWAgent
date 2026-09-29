@@ -3,12 +3,17 @@
 import logging
 import os
 
-from cdwagent.server import main as server_main
 
 logger = logging.getLogger("CDWAgent")
 
 
 def main() -> None:
+    import sys
+    if len(sys.argv) > 1:
+        from .query_cli import main as query_main
+        raise SystemExit(query_main())
+    from cdwagent.server import main as server_main
+
     """CLI entry point — reads env vars and starts the server."""
     log_level = os.getenv("CDW_LOG_LEVEL", "INFO")
     logging.basicConfig(level=getattr(logging, log_level.upper()))
