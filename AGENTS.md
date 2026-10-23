@@ -75,7 +75,7 @@ src/cdwagent/
 
 1. **pip/uvx package** (`src/cdwagent/`): `cli.py` reads env vars → `server.main()` → `create_cdw_server(config)` → `mcp.run()`
 2. **BioRouter extension**: install `extensions/cdwagent.brxt`; BioRouter creates its environment and configures the declared credentials. See `docs/BIOROUTER.md`.
-3. **Job CLI**: `cdwagent submit/status/watch/list/cancel/purge` uses the same durable job runtime as the three MCP job tools. `cdwagent auth` configures a separate standalone OS-keyring profile.
+3. **Job CLI**: `cdwagent submit/status/watch/list/cancel/purge` uses the same durable job runtime as the six MCP job tools. `cdwagent auth` configures a separate standalone OS-keyring profile.
 
 ### Schema Reference
 
@@ -102,7 +102,7 @@ All config via environment variables (see `.env.example`):
 - `CDW_SCHEMA` (database schema for table qualification, default "deid_uf")
 - `CDW_LOG_LEVEL`
 
-### 25 MCP Tools (namespace-prefixed with `CDW-`)
+### 28 MCP Tools (namespace-prefixed with `CDW-`)
 
 | Module | Tools |
 |---|---|
@@ -113,7 +113,7 @@ All config via environment variables (see `.env.example`):
 | concepts.py | `search_diagnoses_by_code`, `search_medications_by_code`, `search_labs_by_code`, `search_procedures_by_code` |
 | stats.py | `summarize_table`, `cohort_summary` |
 | cohort.py | `build_cohort` |
-| jobs.py | `submit_query_job`, `query_job_status`, `cancel_query_job` |
+| jobs.py | `submit_query_job`, `query_job_capacity`, `query_job_status`, `wait_for_query_job`, `read_query_job_result`, `cancel_query_job` |
 
 `search_note_concepts` and `search_note_sdoh` were added in v0.4.0 to expose the
 NLP-extracted concept layer (`note_concepts`, `note_concepts_sdoh`, populated by
@@ -181,7 +181,7 @@ The `crossmap_patient` tool resolves an OMOP `person_id` to a CDW `PatientDurabl
 BioRouter does NOT use a classifier to pick agents; it flattens all enabled extensions' tools into one list and lets the LLM choose. Consequences for this repo:
 
 - Tool names and descriptions ARE the routing signal — keep the `CDW-` prefix to disambiguate from OMOPAgent's `query_ucsf_omop` etc.
-- Use `submit_query_job` for expensive queries/exports and poll `query_job_status` at its recommended interval. Increasing an MCP timeout alone does not make an export durable.
+- Use `submit_query_job` for expensive queries/exports and use native `wait_for_query_job`, or poll `query_job_status` at its recommended interval. Increasing an MCP timeout alone does not make an export durable.
 - Publish tagged releases so BioRouter's `extension_malware_check` pins a stable git ref.
 
 ### Context strategy (LLM dispatch optimization)

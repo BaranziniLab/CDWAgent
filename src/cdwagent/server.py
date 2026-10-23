@@ -226,7 +226,7 @@ def create_cdw_server(config: CDWConfig) -> FastMCP:
             "2. Search the schema for tables related to my topic of interest\n"
             "3. Describe the relevant tables to understand their columns\n"
             "4. Run a bounded preview; use submit_query_job for exports or uncertain-cost queries\n"
-            "5. Poll query_job_status at recommended_poll_seconds until completed; report failures and incomplete results\n\n"
+            "5. Use wait_for_query_job until completed, or query_job_status at recommended_poll_seconds; report failures and incomplete results\n\n"
             f"All tables are in the {schema} schema (e.g., {schema}.PatientDim).\n\n"
             "CRITICAL — PATIENT IDENTIFIERS:\n"
             "- PatientDurableKey is the STABLE patient identifier. Always use it for cohort queries.\n"
@@ -272,7 +272,7 @@ def create_cdw_server(config: CDWConfig) -> FastMCP:
             "3. Use cohort_summary with the patient_key_query to get counts and demographics\n"
             f"4. Retrieve demographics: SELECT ... FROM {schema}.PatientDim WHERE IsCurrent = 1 AND PatientDurableKey IN (subquery)\n"
             "5. For clinical details (labs, meds, encounters): filter fact tables WHERE PatientDurableKey IN (subquery)\n"
-            "6. Export with submit_query_job(format='csv'); monitor query_job_status until completed\n"
+            "6. Export with submit_query_job(format='csv'); use wait_for_query_job until completed\n"
             "   Do not run a costly count only for an ETA. Do not duplicate active jobs.\n\n"
             "KEY COLUMN NAMES:\n"
             "- PatientDim: PatientKey, PatientDurableKey, Sex, BirthDate, DeathDate, FirstRace, Ethnicity\n"
@@ -298,7 +298,7 @@ def create_cdw_server(config: CDWConfig) -> FastMCP:
             "3. Review note metadata (note_type, encounter_type, enc_dept_specialty, deid_service_date)\n"
             "4. Read full note text for relevant findings using get_note\n"
             "5. Summarize patterns, disclose NLP exclusions and population sampling notices\n"
-            "6. For expensive population queries or exports, submit_query_job and poll query_job_status\n\n"
+            "6. For expensive population queries or exports, submit_query_job and wait_for_query_job\n\n"
             "What patient or keyword should we start searching for?"
         )
 
