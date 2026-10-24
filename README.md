@@ -44,9 +44,15 @@ job-routing instructions; the skill folders can also be installed separately.
 ## Long queries, CLI and progress
 
 Use `CDW-submit_query_job` for an export or a query that could exceed the
-interactive timeout. It returns a job ID immediately. Poll
-`CDW-query_job_status` at its recommended interval; use
-`CDW-cancel_query_job` to stop. Only `completed` means the file is complete.
+interactive timeout. Call `CDW-query_job_capacity` first; submission returns a
+job ID immediately and atomically checks the two-job limit. Use
+`CDW-wait_for_query_job` for native waits of up to 30 seconds, or
+`CDW-query_job_status` for an immediate snapshot. Use `CDW-cancel_query_job`
+to stop. Only `completed` means the file is complete. Read bounded UTF-8 chunks
+with `CDW-read_query_job_result` using the job ID and `next_offset`; do not pass
+`result_path` to generic filesystem tools. The secure reader requires POSIX;
+unsupported platforms retain the local CLI file. See [job boundaries and the
+credential-free app fixture](docs/QUERY_JOBS.md#mcp-waiting-capacity-and-result-handoff).
 Status includes rows, bytes, elapsed time, phase and an advisory ETA when known.
 Set `mode="explain"` to obtain a plan without running the query.
 
@@ -63,7 +69,8 @@ uv run cdwagent watch JOB_ID
 
 No-argument `uv run cdwagent` continues to start the MCP server. `status`, `watch`,
 `list`, `cancel` and `purge` need no database credentials. Results remain in the
-local private job directory and are not sent to chat. Database/server limits can
+local private job directory. The bounded result reader can return requested chunks
+to chat; keep controlled data local and share only appropriate summaries. Database/server limits can
 still fail a query; jobs report those failures instead of silently truncating.
 
 See [architecture, storage, security and release details](docs/QUERY_JOBS.md).
@@ -84,7 +91,7 @@ Architecture is based on the [MedCP](https://github.com/BaranziniLab/MedCP) temp
 
 ## Features
 
-- 25 MCP tools: 22 domain tools across 7 modules and 3 durable query-job tools
+- 28 MCP tools: 22 domain tools across 7 modules and 6 durable query-job tools
 - **One-call multimodal cohort building** (`build_cohort`) across 8 modalities:
   diagnosis, medication, procedure, lab, **imaging/radiology**, **immunization**,
   **allergy**, and **vitals/flowsheets** — resolves a term/code, builds the
