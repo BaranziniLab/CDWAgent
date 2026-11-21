@@ -5,7 +5,7 @@
   "version": "0.7.0",
   "entry_point": "cdwagent",
   "repository": "https://github.com/BaranziniLab/CDWAgent",
-  "tools_count": 25,
+  "tools_count": 28,
   "env_vars": [
     {
       "key": "CLINICAL_RECORDS_USERNAME",
