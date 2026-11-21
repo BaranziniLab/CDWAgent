@@ -1,6 +1,6 @@
 # CDWAgent
 
-Current version: **0.6.0**. Small queries stay on MCP; long queries and full
+Current version: **0.7.0**. Small queries stay on MCP; long queries and full
 exports run as monitored local jobs without tying up an MCP request.
 
 ## Install in BioRouter
